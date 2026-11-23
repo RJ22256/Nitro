@@ -28,7 +28,12 @@ FetchContent_Declare(vulkan_headers
     GIT_TAG v1.3.296
     GIT_SHALLOW TRUE
     SOURCE_SUBDIR do-not-add)
-FetchContent_MakeAvailable(minhook vulkan_headers)
+FetchContent_Declare(imgui
+    GIT_REPOSITORY https://github.com/ocornut/imgui.git
+    GIT_TAG v1.91.5
+    GIT_SHALLOW TRUE
+    SOURCE_SUBDIR do-not-add)
+FetchContent_MakeAvailable(minhook vulkan_headers imgui)
 
 add_library(minhook_static STATIC
     ${minhook_SOURCE_DIR}/src/buffer.c
@@ -37,6 +42,17 @@ add_library(minhook_static STATIC
     ${minhook_SOURCE_DIR}/src/hde/hde64.c)
 target_include_directories(minhook_static PUBLIC ${minhook_SOURCE_DIR}/include
                                           PRIVATE ${minhook_SOURCE_DIR}/src ${minhook_SOURCE_DIR}/src/hde)
+
+# Dear ImGui + Nitro's look (used by the app and the in-game menu)
+add_library(nitro_ui STATIC
+    ${imgui_SOURCE_DIR}/imgui.cpp
+    ${imgui_SOURCE_DIR}/imgui_draw.cpp
+    ${imgui_SOURCE_DIR}/imgui_tables.cpp
+    ${imgui_SOURCE_DIR}/imgui_widgets.cpp
+    ${imgui_SOURCE_DIR}/backends/imgui_impl_dx11.cpp
+    ${imgui_SOURCE_DIR}/backends/imgui_impl_win32.cpp
+    core/nitro_ui.cpp)
+target_include_directories(nitro_ui PUBLIC ${imgui_SOURCE_DIR} ${imgui_SOURCE_DIR}/backends)
 
 set(NITRO_WARNINGS $<$<COMPILE_LANGUAGE:CXX>:/W4 /permissive- /utf-8>)
 
@@ -48,8 +64,10 @@ add_library(nitro_core STATIC
     core/blit.cpp
     core/bridge.cpp
     core/runtime.cpp
+    core/overlay.cpp
     core/log.cpp)
 target_compile_options(nitro_core PRIVATE ${NITRO_WARNINGS})
+target_link_libraries(nitro_core PUBLIC nitro_ui minhook_static)
 
 # --- NitroHook.dll: DX9/10/11/12 + OpenGL. Injected, or installed into the
 # game folder as dxgi.dll / d3d9.dll / version.dll. Links no D3D/DXGI import
@@ -81,7 +99,7 @@ add_executable(Nitro WIN32
     common/config.cpp
     common/shader_extract.cpp)
 target_compile_options(Nitro PRIVATE ${NITRO_WARNINGS})
-target_link_libraries(Nitro PRIVATE comctl32 comdlg32 psapi advapi32)
+target_link_libraries(Nitro PRIVATE nitro_ui d3d11 dxgi dwmapi comdlg32 psapi advapi32 shell32)
 add_dependencies(Nitro NitroHook NitroVk)
 
 foreach(t NitroHook NitroVk Nitro)

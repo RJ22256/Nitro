@@ -1,11 +1,19 @@
-// Nitro launcher: pick a game, check Lossless.dll, choose settings,
+// Nitro app: pick a game, check Lossless.dll, choose settings,
 // then either install the hook into the game folder (as dxgi.dll) or start the
 // game with the hook injected.
 
 #include <windows.h>
-#include <commctrl.h>
 #include <commdlg.h>
+#include <d3d11.h>
+#include <dwmapi.h>
 #include <psapi.h>
+#include <shellapi.h>
+#include <wrl/client.h>
+
+#include <imgui.h>
+#include <imgui_internal.h>
+#include <imgui_impl_dx11.h>
+#include <imgui_impl_win32.h>
 
 #include <algorithm>
 #include <cwchar>
@@ -17,9 +25,9 @@
 
 #include "../common/config.h"
 #include "../common/shader_extract.h"
+#include "../core/nitro_ui.h"
 
-#pragma comment(linker, "\"/manifestdependency:type='win32' name='Microsoft.Windows.Common-Controls' " \
-                        "version='6.0.0.0' processorArchitecture='*' publicKeyToken='6595b64144ccf1df' language='*'\"")
+extern IMGUI_IMPL_API LRESULT ImGui_ImplWin32_WndProcHandler(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam);
 
 using namespace lsfgi;
 
@@ -35,29 +43,48 @@ constexpr wchar_t kVkLayersKey[] = L"Software\\Khronos\\Vulkan\\ImplicitLayers";
 enum class Api { Auto, Dxgi, D3D9, OpenGL, Vulkan, Unknown };
 constexpr char kMarker[] = "NITRO_PROXY_MARKER_v1";
 
-enum : int {
-    ID_EXE = 100, ID_BROWSE, ID_EXEINFO, ID_ARGS, ID_LSSTATUS, ID_RECHECK, ID_MULT, ID_FLOW,
-    ID_FLOWVAL, ID_PERF, ID_HDR, ID_VSYNC, ID_INSTALL, ID_UNINSTALL, ID_LAUNCH, ID_LOG, ID_API,
+// Everything the window shows / edits.
+struct UiState {
+    char exe[1024] = {};
+    char args[512] = {};
+    int multiplier = 2;
+    int flowPct = 100;
+    bool performance = false;
+    bool vsync = true;
+    int hdr = 0; // 0 auto, 1 on, 2 off
+    int api = 0; // 0 auto, 1 DXGI, 2 D3D9, 3 OpenGL, 4 Vulkan
+    std::string exeInfo = "Choose the game's .exe file.";
+    std::string exeHint;
+    std::string detected;
+    std::string lossStatus;
+    bool perfAvailable = true;
+    std::vector<std::pair<ImVec4, std::string>> log;
+    bool scrollLog = false;
 };
 
-HINSTANCE g_inst;
-HWND g_wnd;
-HFONT g_font;
-int g_dpi = 96;
-std::wstring g_dir;          // launcher folder
+UiState ui;
+HWND g_wnd = nullptr;
+std::wstring g_dir;          // Nitro folder
 std::wstring g_losslessPath; // Lossless.dll that will be used
 bool g_losslessOk = false;
 
-int S(int v) { return MulDiv(v, g_dpi, 96); }
-HWND Item(int id) { return GetDlgItem(g_wnd, id); }
+std::wstring W(const char* utf8) {
+    const int n = MultiByteToWideChar(CP_UTF8, 0, utf8, -1, nullptr, 0);
+    std::wstring w(static_cast<size_t>(n > 0 ? n - 1 : 0), L'\0');
+    if (n > 1) MultiByteToWideChar(CP_UTF8, 0, utf8, -1, w.data(), n);
+    return w;
+}
 
-std::wstring GetText(int id) {
-    HWND h = Item(id);
-    const int n = GetWindowTextLengthW(h);
-    std::wstring s(static_cast<size_t>(n) + 1, L'\0');
-    GetWindowTextW(h, s.data(), n + 1);
-    s.resize(static_cast<size_t>(n));
+std::string U(const std::wstring& w) {
+    if (w.empty()) return {};
+    const int n = WideCharToMultiByte(CP_UTF8, 0, w.c_str(), static_cast<int>(w.size()), nullptr, 0, nullptr, nullptr);
+    std::string s(static_cast<size_t>(n), '\0');
+    WideCharToMultiByte(CP_UTF8, 0, w.c_str(), static_cast<int>(w.size()), s.data(), n, nullptr, nullptr);
     return s;
+}
+
+void CopyTo(char* dst, size_t cap, const std::string& src) {
+    strncpy_s(dst, cap, src.c_str(), _TRUNCATE);
 }
 
 std::wstring Trim(std::wstring s) {
@@ -92,17 +119,17 @@ std::wstring ErrorText(DWORD code) {
     return s + L" (" + std::to_wstring(code) + L")";
 }
 
-void Log(const std::wstring& line) {
+void Log(const std::wstring& line, ImVec4 color = nitro_ui::kText) {
     SYSTEMTIME t;
     GetLocalTime(&t);
-    wchar_t stamp[16];
-    swprintf(stamp, 16, L"[%02d:%02d:%02d] ", t.wHour, t.wMinute, t.wSecond);
-    HWND h = Item(ID_LOG);
-    const int len = GetWindowTextLengthW(h);
-    SendMessageW(h, EM_SETSEL, len, len);
-    const std::wstring text = std::wstring(len ? L"\r\n" : L"") + stamp + line;
-    SendMessageW(h, EM_REPLACESEL, FALSE, reinterpret_cast<LPARAM>(text.c_str()));
+    char stamp[16];
+    snprintf(stamp, sizeof(stamp), "%02d:%02d:%02d  ", t.wHour, t.wMinute, t.wSecond);
+    ui.log.emplace_back(color, stamp + U(line));
+    if (ui.log.size() > 200) ui.log.erase(ui.log.begin());
+    ui.scrollLog = true;
 }
+void LogOk(const std::wstring& line) { Log(line, nitro_ui::kGood); }
+void LogErr(const std::wstring& line) { Log(line, nitro_ui::kBad); }
 
 // ---------------------------------------------------------------------------
 // Game executable analysis (PE headers + import tables)
@@ -255,8 +282,7 @@ Api DetectApi(const std::wstring& exe, std::wstring& label) {
 
 // The API chosen in the drop-down, or the detected one for "Auto".
 Api ChosenApi(const std::wstring& exe) {
-    const LRESULT sel = SendMessageW(Item(ID_API), CB_GETCURSEL, 0, 0);
-    switch (sel) {
+    switch (ui.api) {
     case 1: return Api::Dxgi;
     case 2: return Api::D3D9;
     case 3: return Api::OpenGL;
@@ -279,31 +305,33 @@ const wchar_t* ApiName(Api a) {
 }
 
 void AnalyzeGame() {
-    const std::wstring exe = Trim(GetText(ID_EXE));
+    ui.exeHint.clear();
+    ui.detected.clear();
+    const std::wstring exe = Trim(W(ui.exe));
     if (exe.empty()) {
-        SetDlgItemTextW(g_wnd, ID_EXEINFO, L"Choose the game's .exe file.");
+        ui.exeInfo = "Choose the game's .exe file.";
         return;
     }
     if (!FileExists(exe)) {
-        SetDlgItemTextW(g_wnd, ID_EXEINFO, L"File not found.");
+        ui.exeInfo = "File not found.";
         return;
     }
     const ExeInfo info = ReadExe(exe);
     if (!info.valid) {
-        SetDlgItemTextW(g_wnd, ID_EXEINFO, L"This doesn't look like a Windows program.");
+        ui.exeInfo = "This doesn't look like a Windows program.";
         return;
     }
     if (!info.x64) {
-        SetDlgItemTextW(g_wnd, ID_EXEINFO, L"32-bit game - not supported (64-bit games only).");
+        ui.exeInfo = "32-bit game: not supported (64-bit games only).";
         return;
     }
     std::wstring label;
     DetectApi(exe, label);
-    std::wstring text = L"64-bit game. Renderer: " + label;
+    ui.exeInfo = "64-bit game";
+    ui.detected = U(label);
     const std::wstring shipping = FindShippingExe(Parent(exe));
     if (!shipping.empty() && _wcsicmp(shipping.c_str(), exe.c_str()) != 0)
-        text += L"\r\nUnreal Engine stub? The real game exe is probably: " + shipping;
-    SetDlgItemTextW(g_wnd, ID_EXEINFO, text.c_str());
+        ui.exeHint = U(shipping);
 }
 
 // ---------------------------------------------------------------------------
@@ -336,16 +364,16 @@ void CheckLossless() {
     std::wstring err;
     std::wstring status;
     if (!FileExists(g_losslessPath)) {
-        status = L"Not found. Copy Lossless.dll from your Lossless Scaling install folder into:\r\n" + g_dir;
+        status = L"Not found. Copy Lossless.dll from Steam\\steamapps\\common\\Lossless Scaling\\ into the Nitro folder.";
     } else if (!InspectLosslessDll(g_losslessPath, report, err)) {
-        status = L"Problem: " + err;
+        status = err;
     } else {
         g_losslessOk = true;
-        status = L"OK (from " + where + L"): " + std::to_wstring(report.dxbc) + L" DirectX shaders, " +
-                 L"performance mode " + (report.performanceSet ? L"available" : L"not available") + L".";
+        status = L"Found in " + where + L" \u00B7 " + std::to_wstring(report.dxbc) + L" shaders \u00B7 performance mode " +
+                 (report.performanceSet ? L"available" : L"unavailable");
     }
-    SetDlgItemTextW(g_wnd, ID_LSSTATUS, status.c_str());
-    EnableWindow(Item(ID_PERF), !g_losslessOk || report.performanceSet);
+    ui.lossStatus = U(status);
+    ui.perfAvailable = !g_losslessOk || report.performanceSet;
 }
 
 // ---------------------------------------------------------------------------
@@ -357,28 +385,20 @@ Config ConfigFromUi() {
     Config c;
     LoadConfig(IniPath(), c); // keep advanced keys (hotkeys etc.) the user may have edited
     c.losslessDll = g_losslessPath;
-    c.multiplier = static_cast<int>(SendMessageW(Item(ID_MULT), CB_GETCURSEL, 0, 0)) + 2;
-    c.flowScale = static_cast<float>(SendMessageW(Item(ID_FLOW), TBM_GETPOS, 0, 0)) / 100.0f;
-    c.performanceMode = IsDlgButtonChecked(g_wnd, ID_PERF) == BST_CHECKED;
-    c.vsyncPacing = IsDlgButtonChecked(g_wnd, ID_VSYNC) == BST_CHECKED;
-    const LRESULT hdr = SendMessageW(Item(ID_HDR), CB_GETCURSEL, 0, 0);
-    c.hdr = hdr == 1 ? 1 : (hdr == 2 ? 0 : -1);
+    c.multiplier = ClampMultiplier(ui.multiplier);
+    c.flowScale = static_cast<float>(ui.flowPct) / 100.0f;
+    c.performanceMode = ui.performance;
+    c.vsyncPacing = ui.vsync;
+    c.hdr = ui.hdr == 1 ? 1 : (ui.hdr == 2 ? 0 : -1);
     c.api = L"auto";
     return c;
 }
 
 void SaveUi() {
     SaveConfig(IniPath(), ConfigFromUi());
-    WritePrivateProfileStringW(L"Launcher", L"GameExe", Trim(GetText(ID_EXE)).c_str(), IniPath().c_str());
-    WritePrivateProfileStringW(L"Launcher", L"Arguments", GetText(ID_ARGS).c_str(), IniPath().c_str());
-    WritePrivateProfileStringW(
-        L"Launcher", L"ApiChoice",
-        std::to_wstring(SendMessageW(Item(ID_API), CB_GETCURSEL, 0, 0)).c_str(), IniPath().c_str());
-}
-
-void UpdateFlowLabel() {
-    const LRESULT v = SendMessageW(Item(ID_FLOW), TBM_GETPOS, 0, 0);
-    SetDlgItemTextW(g_wnd, ID_FLOWVAL, (std::to_wstring(v) + L"%").c_str());
+    WritePrivateProfileStringW(L"Launcher", L"GameExe", Trim(W(ui.exe)).c_str(), IniPath().c_str());
+    WritePrivateProfileStringW(L"Launcher", L"Arguments", W(ui.args).c_str(), IniPath().c_str());
+    WritePrivateProfileStringW(L"Launcher", L"ApiChoice", std::to_wstring(ui.api).c_str(), IniPath().c_str());
 }
 
 void LoadUi() {
@@ -386,17 +406,16 @@ void LoadUi() {
     LoadConfig(IniPath(), c);
     wchar_t buf[2048] = {};
     GetPrivateProfileStringW(L"Launcher", L"GameExe", L"", buf, 2048, IniPath().c_str());
-    SetDlgItemTextW(g_wnd, ID_EXE, buf);
+    CopyTo(ui.exe, sizeof(ui.exe), U(buf));
     GetPrivateProfileStringW(L"Launcher", L"Arguments", L"", buf, 2048, IniPath().c_str());
-    SetDlgItemTextW(g_wnd, ID_ARGS, buf);
-    SendMessageW(Item(ID_API), CB_SETCURSEL,
-                 static_cast<WPARAM>(GetPrivateProfileIntW(L"Launcher", L"ApiChoice", 0, IniPath().c_str())), 0);
-    SendMessageW(Item(ID_MULT), CB_SETCURSEL, ClampMultiplier(c.multiplier) - 2, 0);
-    SendMessageW(Item(ID_FLOW), TBM_SETPOS, TRUE, static_cast<LPARAM>(c.flowScale * 100.0f + 0.5f));
-    CheckDlgButton(g_wnd, ID_PERF, c.performanceMode ? BST_CHECKED : BST_UNCHECKED);
-    CheckDlgButton(g_wnd, ID_VSYNC, c.vsyncPacing ? BST_CHECKED : BST_UNCHECKED);
-    SendMessageW(Item(ID_HDR), CB_SETCURSEL, c.hdr < 0 ? 0 : (c.hdr ? 1 : 2), 0);
-    UpdateFlowLabel();
+    CopyTo(ui.args, sizeof(ui.args), U(buf));
+    ui.api = static_cast<int>(GetPrivateProfileIntW(L"Launcher", L"ApiChoice", 0, IniPath().c_str()));
+    if (ui.api < 0 || ui.api > 4) ui.api = 0;
+    ui.multiplier = ClampMultiplier(c.multiplier);
+    ui.flowPct = static_cast<int>(c.flowScale * 100.0f + 0.5f);
+    ui.performance = c.performanceMode;
+    ui.vsync = c.vsyncPacing;
+    ui.hdr = c.hdr < 0 ? 0 : (c.hdr ? 1 : 2);
 }
 
 // ---------------------------------------------------------------------------
@@ -411,19 +430,19 @@ bool IsOurDll(const std::wstring& path) {
 }
 
 bool Preflight(std::wstring& exe, Api& api) {
-    exe = Trim(GetText(ID_EXE));
+    exe = Trim(W(ui.exe));
     if (exe.empty() || !FileExists(exe)) {
-        Log(L"Choose the game's .exe first.");
+        LogErr(L"Choose the game's .exe first.");
         return false;
     }
     const ExeInfo info = ReadExe(exe);
     if (!info.valid || !info.x64) {
-        Log(L"Only 64-bit games are supported.");
+        LogErr(L"Only 64-bit games are supported.");
         return false;
     }
     CheckLossless();
     if (!g_losslessOk) {
-        Log(L"Lossless.dll is missing or unusable - see the Lossless.dll box above.");
+        LogErr(L"Lossless.dll is missing or unusable - see the Lossless.dll card.");
         return false;
     }
     api = ChosenApi(exe);
@@ -523,11 +542,11 @@ void Install() {
 
     if (api == Api::Vulkan) {
         if (!RegisterVulkanLayer()) {
-            Log(L"Could not register the Nitro Vulkan layer in the registry.");
+            LogErr(L"Could not register the Nitro Vulkan layer in the registry.");
             return;
         }
         WritePrivateProfileStringW(L"VulkanGames", Lower(exe).c_str(), L"1", IniPath().c_str());
-        Log(L"Vulkan game enabled. Nothing was copied into the game folder; Nitro's Vulkan layer "
+        LogOk(L"Vulkan game enabled. Nothing was copied into the game folder; Nitro's Vulkan layer "
             L"switches on for this exe only. Start the game normally.");
         Log(L"Settings come from the Nitro folder; the log is NitroVk.log there.");
         return;
@@ -557,7 +576,7 @@ void Install() {
     }
     if (!CopyFileW((g_dir + L"\\" + kHookDll).c_str(), dst.c_str(), FALSE)) {
         const DWORD e = GetLastError();
-        Log(L"Copy failed: " + ErrorText(e));
+        LogErr(L"Copy failed: " + ErrorText(e));
         if (e == ERROR_ACCESS_DENIED) Log(L"Try running Nitro as administrator.");
         return;
     }
@@ -567,15 +586,15 @@ void Install() {
         Log(L"Could not write the settings file into the game folder.");
         return;
     }
-    Log(std::wstring(L"Installed for ") + ApiName(api) + L" as " + proxy + L" in " + gameDir +
+    LogOk(std::wstring(L"Installed for ") + ApiName(api) + L" as " + proxy + L" in " + gameDir +
         L". Start the game normally (Steam, etc.).");
     Log(L"A log is written to Nitro.log in the game folder.");
 }
 
 void Uninstall() {
-    const std::wstring exe = Trim(GetText(ID_EXE));
+    const std::wstring exe = Trim(W(ui.exe));
     if (exe.empty()) {
-        Log(L"Choose the game's .exe first.");
+        LogErr(L"Choose the game's .exe first.");
         return;
     }
     const std::wstring gameDir = Parent(exe);
@@ -590,7 +609,7 @@ void Uninstall() {
     }
     DeleteFileW((gameDir + L"\\" + kConfigFileName).c_str());
     DeleteFileW((gameDir + L"\\Nitro.log").c_str());
-    Log(changed ? L"Removed Nitro from " + gameDir : L"Nothing to remove for " + gameDir);
+    if (changed) LogOk(L"Removed Nitro from " + gameDir); else Log(L"Nothing to remove for " + gameDir);
 }
 
 HMODULE FindRemoteModule(HANDLE process, const std::wstring& path) {
@@ -622,7 +641,7 @@ void Launch() {
     SaveUi(); // the injected DLL / Vulkan layer read Nitro.ini from the Nitro folder
 
     std::wstring cmd = L"\"" + exe + L"\"";
-    const std::wstring args = Trim(GetText(ID_ARGS));
+    const std::wstring args = Trim(W(ui.args));
     if (!args.empty()) cmd += L" " + args;
     const std::wstring workDir = Parent(exe);
     STARTUPINFOW si{};
@@ -631,7 +650,7 @@ void Launch() {
 
     if (api == Api::Vulkan) {
         if (!RegisterVulkanLayer()) {
-            Log(L"Could not register the Nitro Vulkan layer in the registry.");
+            LogErr(L"Could not register the Nitro Vulkan layer in the registry.");
             return;
         }
         SetEnvironmentVariableW(L"NITRO_VULKAN", L"1"); // inherited by the game only
@@ -644,7 +663,7 @@ void Launch() {
         }
         CloseHandle(pi.hThread);
         CloseHandle(pi.hProcess);
-        Log(L"Vulkan game started with Nitro's layer. Log: " + g_dir + L"\\NitroVk.log");
+        LogOk(L"Vulkan game started with Nitro's layer. Log: " + g_dir + L"\\NitroVk.log");
         return;
     }
 
@@ -697,17 +716,17 @@ void Launch() {
     CloseHandle(pi.hProcess);
 
     if (ok) {
-        Log(std::wstring(L"Game started with Nitro (") + ApiName(api) + L"). Log: " + g_dir + L"\\Nitro.log");
+        LogOk(std::wstring(L"Game started with Nitro (") + ApiName(api) + L"). Log: " + g_dir + L"\\Nitro.log");
         Log(L"If the game restarts itself through Steam, use 'Install into game folder' instead.");
     } else {
-        Log(L"Game started, but injection failed (anti-cheat or permissions?). "
+        LogErr(L"Game started, but injection failed (anti-cheat or permissions?). "
             L"Try 'Install into game folder' instead.");
     }
 }
 
 void Browse() {
     wchar_t file[MAX_PATH] = {};
-    const std::wstring current = Trim(GetText(ID_EXE));
+    const std::wstring current = Trim(W(ui.exe));
     wcsncpy_s(file, current.c_str(), _TRUNCATE);
     OPENFILENAMEW ofn{};
     ofn.lStructSize = sizeof(ofn);
@@ -718,102 +737,315 @@ void Browse() {
     ofn.lpstrTitle = L"Choose the game's .exe";
     ofn.Flags = OFN_FILEMUSTEXIST | OFN_PATHMUSTEXIST | OFN_NOCHANGEDIR;
     if (GetOpenFileNameW(&ofn)) {
-        SetDlgItemTextW(g_wnd, ID_EXE, file);
+        CopyTo(ui.exe, sizeof(ui.exe), U(file));
         AnalyzeGame();
         SaveUi();
     }
 }
 
 // ---------------------------------------------------------------------------
-// Window
+// Window (Dear ImGui on D3D11)
 
-HWND Add(const wchar_t* cls, const wchar_t* text, DWORD style, int x, int y, int w, int h, int id, DWORD ex = 0) {
-    HWND c = CreateWindowExW(ex, cls, text, WS_CHILD | WS_VISIBLE | style, S(x), S(y), S(w), S(h), g_wnd,
-                             reinterpret_cast<HMENU>(static_cast<INT_PTR>(id)), g_inst, nullptr);
-    SendMessageW(c, WM_SETFONT, reinterpret_cast<WPARAM>(g_font), TRUE);
-    return c;
+using Microsoft::WRL::ComPtr;
+
+ComPtr<ID3D11Device> g_device;
+ComPtr<ID3D11DeviceContext> g_context;
+ComPtr<IDXGISwapChain> g_swapChain;
+ComPtr<ID3D11RenderTargetView> g_rtv;
+nitro_ui::Fonts g_fonts;
+float g_scale = 1.0f;
+UINT g_resizeW = 0, g_resizeH = 0;
+
+bool CreateDeviceD3D(HWND hwnd) {
+    DXGI_SWAP_CHAIN_DESC sd{};
+    sd.BufferCount = 2;
+    sd.BufferDesc.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
+    sd.BufferUsage = DXGI_USAGE_RENDER_TARGET_OUTPUT;
+    sd.OutputWindow = hwnd;
+    sd.SampleDesc.Count = 1;
+    sd.Windowed = TRUE;
+    sd.SwapEffect = DXGI_SWAP_EFFECT_FLIP_DISCARD;
+    const D3D_FEATURE_LEVEL levels[] = {D3D_FEATURE_LEVEL_11_0, D3D_FEATURE_LEVEL_10_0};
+    HRESULT hr = D3D11CreateDeviceAndSwapChain(nullptr, D3D_DRIVER_TYPE_HARDWARE, nullptr, 0, levels, 2,
+                                               D3D11_SDK_VERSION, &sd, &g_swapChain, &g_device, nullptr, &g_context);
+    if (FAILED(hr))
+        hr = D3D11CreateDeviceAndSwapChain(nullptr, D3D_DRIVER_TYPE_WARP, nullptr, 0, levels, 2, D3D11_SDK_VERSION,
+                                           &sd, &g_swapChain, &g_device, nullptr, &g_context);
+    if (FAILED(hr)) return false;
+    ComPtr<ID3D11Texture2D> back;
+    g_swapChain->GetBuffer(0, IID_PPV_ARGS(&back));
+    g_device->CreateRenderTargetView(back.Get(), nullptr, &g_rtv);
+    return true;
 }
 
-void CreateControls() {
-    Add(L"STATIC", L"Game executable (.exe):", 0, 14, 12, 400, 18, -1);
-    Add(L"EDIT", L"", WS_TABSTOP | ES_AUTOHSCROLL, 14, 32, 450, 24, ID_EXE, WS_EX_CLIENTEDGE);
-    Add(L"BUTTON", L"Browse...", WS_TABSTOP | BS_PUSHBUTTON, 472, 31, 94, 26, ID_BROWSE);
-    Add(L"STATIC", L"Choose the game's .exe file.", 0, 14, 62, 552, 36, ID_EXEINFO);
-    Add(L"STATIC", L"Launch arguments (only used by 'Launch with injection'):", 0, 14, 102, 552, 18, -1);
-    Add(L"EDIT", L"", WS_TABSTOP | ES_AUTOHSCROLL, 14, 122, 552, 24, ID_ARGS, WS_EX_CLIENTEDGE);
+void ResizeSwapChain() {
+    g_rtv.Reset();
+    g_swapChain->ResizeBuffers(0, g_resizeW, g_resizeH, DXGI_FORMAT_UNKNOWN, 0);
+    ComPtr<ID3D11Texture2D> back;
+    g_swapChain->GetBuffer(0, IID_PPV_ARGS(&back));
+    g_device->CreateRenderTargetView(back.Get(), nullptr, &g_rtv);
+    g_resizeW = g_resizeH = 0;
+}
 
-    Add(L"BUTTON", L"Lossless.dll", BS_GROUPBOX, 14, 156, 552, 68, -1);
-    Add(L"STATIC", L"", 0, 26, 176, 430, 42, ID_LSSTATUS);
-    Add(L"BUTTON", L"Re-check", WS_TABSTOP | BS_PUSHBUTTON, 466, 180, 88, 26, ID_RECHECK);
+// Text with the logo's cyan -> pink gradient.
+void GradientText(ImFont* font, const char* text) {
+    ImGui::PushFont(font);
+    const ImVec2 p = ImGui::GetCursorScreenPos();
+    const ImVec2 size = ImGui::CalcTextSize(text);
+    ImDrawList* dl = ImGui::GetWindowDrawList();
+    const int v0 = dl->VtxBuffer.Size;
+    dl->AddText(p, IM_COL32_WHITE, text);
+    ImGui::ShadeVertsLinearColorGradientKeepAlpha(dl, v0, dl->VtxBuffer.Size, p, ImVec2(p.x + size.x, p.y),
+                                                  nitro_ui::kCyan, nitro_ui::kPink);
+    ImGui::Dummy(size);
+    ImGui::PopFont();
+}
 
-    Add(L"BUTTON", L"Frame generation", BS_GROUPBOX, 14, 232, 552, 202, -1);
-    Add(L"STATIC", L"Multiplier:", 0, 26, 258, 90, 20, -1);
-    HWND mult = Add(L"COMBOBOX", L"", WS_TABSTOP | CBS_DROPDOWNLIST | WS_VSCROLL, 116, 254, 90, 200, ID_MULT);
-    for (const wchar_t* s : {L"2x", L"3x", L"4x"}) SendMessageW(mult, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(s));
-    Add(L"STATIC", L"Flow scale:", 0, 236, 258, 80, 20, -1);
-    HWND flow = Add(TRACKBAR_CLASSW, L"", WS_TABSTOP | TBS_HORZ | TBS_NOTICKS, 312, 252, 186, 30, ID_FLOW);
-    SendMessageW(flow, TBM_SETRANGE, TRUE, MAKELPARAM(25, 100));
-    SendMessageW(flow, TBM_SETLINESIZE, 0, 5);
-    SendMessageW(flow, TBM_SETPAGESIZE, 0, 10);
-    Add(L"STATIC", L"100%", 0, 504, 258, 50, 20, ID_FLOWVAL);
+void CardTitle(const char* title) {
+    ImGui::PushFont(g_fonts.bold);
+    ImGui::TextUnformatted(title);
+    ImGui::PopFont();
+}
 
-    Add(L"BUTTON", L"Performance mode (faster, lower quality)", WS_TABSTOP | BS_AUTOCHECKBOX, 26, 290, 310, 22, ID_PERF);
-    Add(L"STATIC", L"HDR:", 0, 352, 294, 40, 20, -1);
-    HWND hdr = Add(L"COMBOBOX", L"", WS_TABSTOP | CBS_DROPDOWNLIST | WS_VSCROLL, 394, 290, 110, 200, ID_HDR);
-    for (const wchar_t* s : {L"Auto", L"On", L"Off"}) SendMessageW(hdr, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(s));
-    Add(L"BUTTON", L"Pace generated frames with VSync (recommended)", WS_TABSTOP | BS_AUTOCHECKBOX, 26, 318, 500, 22, ID_VSYNC);
-    Add(L"STATIC", L"Graphics API:", 0, 26, 352, 90, 20, -1);
-    HWND api = Add(L"COMBOBOX", L"", WS_TABSTOP | CBS_DROPDOWNLIST | WS_VSCROLL, 116, 348, 220, 200, ID_API);
-    for (const wchar_t* s : {L"Auto-detect", L"DirectX 10 / 11 / 12", L"DirectX 9", L"OpenGL", L"Vulkan"})
-        SendMessageW(api, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(s));
-    SendMessageW(api, CB_SETCURSEL, 0, 0);
-    Add(L"STATIC",
-        L"In game: End = frame gen on/off, Home = cycle 2x / 3x / 4x.\r\n"
-        L"Cap the game's FPS to refresh rate ÷ multiplier (e.g. 60 FPS on a 240 Hz screen for 4x).",
-        0, 26, 380, 530, 48, -1);
+bool BeginCard(const char* id, ImVec2 size) {
+    ImGuiChildFlags flags = ImGuiChildFlags_Borders | ImGuiChildFlags_AlwaysUseWindowPadding;
+    if (size.y <= 0) flags |= ImGuiChildFlags_AutoResizeY; // height 0 = fit contents
+    return ImGui::BeginChild(id, size, flags);
+}
 
-    Add(L"BUTTON", L"Install into game folder", WS_TABSTOP | BS_PUSHBUTTON, 14, 446, 180, 32, ID_INSTALL);
-    Add(L"BUTTON", L"Remove from game folder", WS_TABSTOP | BS_PUSHBUTTON, 204, 446, 180, 32, ID_UNINSTALL);
-    Add(L"BUTTON", L"Launch with injection", WS_TABSTOP | BS_PUSHBUTTON, 394, 446, 172, 32, ID_LAUNCH);
-    Add(L"EDIT", L"", WS_VSCROLL | ES_MULTILINE | ES_READONLY | ES_AUTOVSCROLL, 14, 490, 552, 150, ID_LOG,
-        WS_EX_CLIENTEDGE);
+void KeyRow(const char* key, const char* what) {
+    const float y = ImGui::GetCursorPosY();
+    ImGui::SetCursorPosX(ImGui::GetCursorPosX());
+    const float keyCol = 74 * g_scale;
+    const float x0 = ImGui::GetCursorPosX();
+    nitro_ui::Chip(key, ImVec4(0.0f, 0.898f, 1.0f, 1.0f));
+    ImGui::SameLine(x0 + keyCol);
+    ImGui::SetCursorPosY(y + 3.0f); // line up with the chip's text
+    ImGui::TextUnformatted(what);
+}
+
+void DrawUi() {
+    const float s = g_scale;
+    const ImGuiViewport* vp = ImGui::GetMainViewport();
+    ImGui::SetNextWindowPos(vp->WorkPos);
+    ImGui::SetNextWindowSize(vp->WorkSize);
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowRounding, 0.0f);
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowBorderSize, 0.0f);
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(24 * s, 20 * s));
+    ImGui::Begin("##main", nullptr,
+                 ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoSavedSettings |
+                     ImGuiWindowFlags_NoBringToFrontOnFocus);
+    ImGui::PopStyleVar(3);
+    bool changed = false;
+
+    // ---- Header
+    {
+        const float logo = 96 * s;
+        nitro_ui::DrawLogo(ImGui::GetWindowDrawList(), ImGui::GetCursorScreenPos(), logo);
+        ImGui::Dummy(ImVec2(logo, logo));
+        ImGui::SameLine(0, 18 * s);
+        ImGui::BeginGroup();
+        GradientText(g_fonts.title, "NITRO");
+        ImGui::TextColored(nitro_ui::kMuted, "Frame generation for any game \xC2\xB7 powered by your Lossless Scaling");
+        ImGui::PushFont(g_fonts.small);
+        const char* chips[] = {"DirectX 9", "DirectX 10", "DirectX 11", "DirectX 12", "OpenGL", "Vulkan"};
+        for (int i = 0; i < 6; ++i) {
+            if (i) ImGui::SameLine(0, 6 * s);
+            nitro_ui::Chip(chips[i], ImVec4(0.478f, 0.361f, 1.0f, 1.0f));
+        }
+        ImGui::PopFont();
+        ImGui::EndGroup();
+    }
+    ImGui::Spacing();
+
+    const float avail = ImGui::GetContentRegionAvail().x;
+    const float gap = ImGui::GetStyle().ItemSpacing.x * 1.5f;
+
+    // ---- Game card
+    if (BeginCard("##game", ImVec2(avail, 0))) {
+        CardTitle("Game");
+        const float bw = 110 * s;
+        ImGui::SetNextItemWidth(ImGui::GetContentRegionAvail().x - bw - ImGui::GetStyle().ItemSpacing.x);
+        ImGui::InputTextWithHint("##exe", "Choose the game's .exe", ui.exe, sizeof(ui.exe));
+        if (ImGui::IsItemDeactivatedAfterEdit()) {
+            AnalyzeGame();
+            changed = true;
+        }
+        ImGui::SameLine();
+        if (nitro_ui::GhostButton("Browse...", ImVec2(bw, 0))) Browse();
+
+        const bool good = ui.exeInfo == "64-bit game";
+        nitro_ui::Chip(ui.exeInfo.c_str(), good ? nitro_ui::kGood : nitro_ui::kMuted);
+        if (!ui.detected.empty()) {
+            ImGui::SameLine();
+            nitro_ui::Chip(("Renderer: " + ui.detected).c_str(), ImVec4(0.0f, 0.898f, 1.0f, 1.0f));
+        }
+        if (!ui.exeHint.empty()) {
+            ImGui::TextColored(nitro_ui::kWarn, "Unreal Engine launcher stub? The real game is probably:");
+            ImGui::TextColored(nitro_ui::kMuted, "%s", ui.exeHint.c_str());
+            ImGui::SameLine();
+            if (ImGui::SmallButton("Use this exe")) {
+                CopyTo(ui.exe, sizeof(ui.exe), ui.exeHint);
+                AnalyzeGame();
+                changed = true;
+            }
+        }
+        ImGui::SetNextItemWidth(ImGui::GetContentRegionAvail().x);
+        ImGui::InputTextWithHint("##args", "Launch arguments (optional, for Launch with injection)", ui.args,
+                                 sizeof(ui.args));
+        if (ImGui::IsItemDeactivatedAfterEdit()) changed = true;
+    }
+    ImGui::EndChild();
+    ImGui::Spacing();
+
+    // ---- Two columns
+    const float colW = (avail - gap) * 0.5f;
+    const float colH = 352 * s;
+    if (BeginCard("##fg", ImVec2(colW, colH))) {
+        CardTitle("Frame generation");
+        const float toggleW = ImGui::GetFrameHeight() * 0.85f * 1.85f;
+        nitro_ui::RowLabel("Multiplier");
+        {
+            const float pw = 64 * s;
+            nitro_ui::SameLineRight(pw * 3 + 8 * s * 2);
+            for (int m = 2; m <= 4; ++m) {
+                char label[8];
+                snprintf(label, sizeof(label), "%dx", m);
+                if (nitro_ui::Pill(label, ui.multiplier == m, ImVec2(pw, ImGui::GetFrameHeight()))) {
+                    ui.multiplier = m;
+                    changed = true;
+                }
+                if (m < 4) ImGui::SameLine(0, 8 * s);
+            }
+        }
+        nitro_ui::RowLabel("Flow scale");
+        {
+            const float sw = 200 * s;
+            nitro_ui::SameLineRight(sw);
+            ImGui::SetNextItemWidth(sw);
+            ImGui::SliderInt("##flow", &ui.flowPct, 25, 100, "%d%%");
+            if (ImGui::IsItemDeactivatedAfterEdit()) changed = true;
+        }
+        ImGui::BeginDisabled(!ui.perfAvailable);
+        nitro_ui::RowLabel("Performance mode");
+        nitro_ui::SameLineRight(toggleW);
+        changed |= nitro_ui::Toggle("##perf", &ui.performance);
+        ImGui::EndDisabled();
+        nitro_ui::RowLabel("VSync pacing", "(recommended)");
+        nitro_ui::SameLineRight(toggleW);
+        changed |= nitro_ui::Toggle("##vsync", &ui.vsync);
+        nitro_ui::RowLabel("HDR");
+        {
+            const float cw = 200 * s;
+            nitro_ui::SameLineRight(cw);
+            ImGui::SetNextItemWidth(cw);
+            const char* items[] = {"Auto", "On", "Off"};
+            changed |= ImGui::Combo("##hdr", &ui.hdr, items, 3);
+        }
+        nitro_ui::RowLabel("Graphics API");
+        {
+            const float cw = 200 * s;
+            nitro_ui::SameLineRight(cw);
+            ImGui::SetNextItemWidth(cw);
+            const char* items[] = {"Auto-detect", "DirectX 10 / 11 / 12", "DirectX 9", "OpenGL", "Vulkan"};
+            changed |= ImGui::Combo("##api", &ui.api, items, 5);
+        }
+        ImGui::PushFont(g_fonts.small);
+        ImGui::TextColored(nitro_ui::kMuted, "Lower flow scale = faster. Try 50-75%% at 1440p / 4K.");
+        ImGui::PopFont();
+    }
+    ImGui::EndChild();
+    ImGui::SameLine(0, gap);
+    ImGui::BeginGroup();
+    const float lossH = 158 * s;
+    if (BeginCard("##loss", ImVec2(colW, lossH))) {
+        CardTitle("Lossless.dll");
+        ImGui::SameLine();
+        nitro_ui::Chip(g_losslessOk ? "Ready" : "Missing", g_losslessOk ? nitro_ui::kGood : nitro_ui::kBad);
+        ImGui::PushTextWrapPos(0);
+        ImGui::TextColored(nitro_ui::kMuted, "%s", ui.lossStatus.c_str());
+        ImGui::PopTextWrapPos();
+        if (nitro_ui::GhostButton("Re-check", ImVec2(110 * s, 0))) CheckLossless();
+        ImGui::SameLine();
+        if (nitro_ui::GhostButton("Open Nitro folder", ImVec2(170 * s, 0)))
+            ShellExecuteW(nullptr, L"open", g_dir.c_str(), nullptr, nullptr, SW_SHOWNORMAL);
+    }
+    ImGui::EndChild();
+    if (BeginCard("##keys", ImVec2(colW, colH - lossH - ImGui::GetStyle().ItemSpacing.y))) {
+        CardTitle("In game");
+        KeyRow("Insert", "Open the Nitro menu");
+        KeyRow("End", "Frame generation on / off");
+        KeyRow("Home", "Cycle 2x / 3x / 4x");
+        ImGui::PushFont(g_fonts.small);
+        ImGui::PushTextWrapPos(0);
+        ImGui::TextColored(nitro_ui::kMuted,
+                           "Cap the game at refresh rate \xC3\xB7 multiplier for the smoothest result "
+                           "(e.g. 60 FPS on 240 Hz at 4x).");
+        ImGui::PopTextWrapPos();
+        ImGui::PopFont();
+    }
+    ImGui::EndChild();
+    ImGui::EndGroup();
+    ImGui::Spacing();
+
+    // ---- Actions
+    {
+        const float h = 46 * s;
+        const float w3 = (avail - gap * 2) / 3.0f;
+        ImGui::PushFont(g_fonts.bold);
+        if (nitro_ui::AccentButton("Install into game##install", ImVec2(w3, h))) Install();
+        ImGui::SameLine(0, gap);
+        if (nitro_ui::GhostButton("Launch with injection", ImVec2(w3, h))) Launch();
+        ImGui::SameLine(0, gap);
+        if (nitro_ui::GhostButton("Remove from game", ImVec2(w3, h))) Uninstall();
+        ImGui::PopFont();
+    }
+    ImGui::Spacing();
+
+    // ---- Log
+    const float footer = ImGui::GetTextLineHeightWithSpacing() + 4 * s;
+    if (BeginCard("##log", ImVec2(avail, (std::max)(90 * s, ImGui::GetContentRegionAvail().y - footer)))) {
+        ImGui::PushFont(g_fonts.small);
+        for (const auto& [color, line] : ui.log) {
+            ImGui::PushTextWrapPos(0);
+            ImGui::TextColored(color, "%s", line.c_str());
+            ImGui::PopTextWrapPos();
+        }
+        if (ui.scrollLog) {
+            ImGui::SetScrollHereY(1.0f);
+            ui.scrollLog = false;
+        }
+        ImGui::PopFont();
+    }
+    ImGui::EndChild();
+    ImGui::PushFont(g_fonts.small);
+    ImGui::TextColored(nitro_ui::kMuted,
+                       "Single-player games only \xC2\xB7 Not affiliated with Lossless Scaling \xC2\xB7 Logs: Nitro.log "
+                       "(game folder) or NitroVk.log (Nitro folder)");
+    ImGui::PopFont();
+
+    if (changed) SaveUi();
+    ImGui::End();
 }
 
 LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
+    if (ImGui_ImplWin32_WndProcHandler(hwnd, msg, wp, lp)) return TRUE;
     switch (msg) {
-    case WM_CREATE:
-        g_wnd = hwnd;
-        CreateControls();
-        LoadUi();
-        CheckLossless();
-        AnalyzeGame();
-        Log(L"Ready. Supports DirectX 9/10/11/12, OpenGL and Vulkan. Single-player games only - "
-            L"never use this with online/anti-cheat games.");
-        return 0;
-    case WM_COMMAND:
-        switch (LOWORD(wp)) {
-        case ID_BROWSE: Browse(); break;
-        case ID_RECHECK: CheckLossless(); break;
-        case ID_INSTALL: Install(); break;
-        case ID_UNINSTALL: Uninstall(); break;
-        case ID_LAUNCH: Launch(); break;
-        case ID_EXE:
-            if (HIWORD(wp) == EN_KILLFOCUS) AnalyzeGame();
-            break;
+    case WM_SIZE:
+        if (wp != SIZE_MINIMIZED) {
+            g_resizeW = LOWORD(lp);
+            g_resizeH = HIWORD(lp);
         }
         return 0;
-    case WM_HSCROLL:
-        if (reinterpret_cast<HWND>(lp) == Item(ID_FLOW)) {
-            // snap to 5% steps
-            const LRESULT v = SendMessageW(Item(ID_FLOW), TBM_GETPOS, 0, 0);
-            SendMessageW(Item(ID_FLOW), TBM_SETPOS, TRUE, ((v + 2) / 5) * 5);
-            UpdateFlowLabel();
-        }
+    case WM_GETMINMAXINFO: {
+        auto* mm = reinterpret_cast<MINMAXINFO*>(lp);
+        mm->ptMinTrackSize.x = static_cast<LONG>(860 * g_scale);
+        mm->ptMinTrackSize.y = static_cast<LONG>(820 * g_scale);
         return 0;
-    case WM_CLOSE:
-        SaveUi();
-        DestroyWindow(hwnd);
-        return 0;
+    }
+    case WM_SYSCOMMAND:
+        if ((wp & 0xfff0) == SC_KEYMENU) return 0; // no Alt menu beep
+        break;
     case WM_DESTROY:
         PostQuitMessage(0);
         return 0;
@@ -824,51 +1056,89 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
 } // namespace
 
 int WINAPI wWinMain(HINSTANCE inst, HINSTANCE, LPWSTR, int show) {
-    g_inst = inst;
-    SetProcessDPIAware();
-    HDC screen = GetDC(nullptr);
-    g_dpi = GetDeviceCaps(screen, LOGPIXELSX);
-    ReleaseDC(nullptr, screen);
-
-    INITCOMMONCONTROLSEX icc{sizeof(icc), ICC_BAR_CLASSES | ICC_STANDARD_CLASSES};
-    InitCommonControlsEx(&icc);
-
-    NONCLIENTMETRICSW ncm{};
-    ncm.cbSize = sizeof(ncm);
-    SystemParametersInfoW(SPI_GETNONCLIENTMETRICS, sizeof(ncm), &ncm, 0);
-    g_font = CreateFontIndirectW(&ncm.lfMessageFont);
-
+    SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
     g_dir = ModuleDirectory(nullptr);
 
     WNDCLASSEXW wc{};
     wc.cbSize = sizeof(wc);
+    wc.style = CS_CLASSDC;
     wc.lpfnWndProc = WndProc;
     wc.hInstance = inst;
     wc.hCursor = LoadCursorW(nullptr, IDC_ARROW);
-    wc.hbrBackground = reinterpret_cast<HBRUSH>(COLOR_BTNFACE + 1);
-    wc.hIcon = static_cast<HICON>(LoadImageW(inst, MAKEINTRESOURCEW(1), IMAGE_ICON,
-        GetSystemMetrics(SM_CXICON), GetSystemMetrics(SM_CYICON), LR_DEFAULTCOLOR));
-    wc.hIconSm = static_cast<HICON>(LoadImageW(inst, MAKEINTRESOURCEW(1), IMAGE_ICON,
-        GetSystemMetrics(SM_CXSMICON), GetSystemMetrics(SM_CYSMICON), LR_DEFAULTCOLOR));
-    wc.lpszClassName = L"NitroLauncher";
+    wc.hIcon = static_cast<HICON>(LoadImageW(inst, MAKEINTRESOURCEW(1), IMAGE_ICON, GetSystemMetrics(SM_CXICON),
+                                             GetSystemMetrics(SM_CYICON), LR_DEFAULTCOLOR));
+    wc.hIconSm = static_cast<HICON>(LoadImageW(inst, MAKEINTRESOURCEW(1), IMAGE_ICON, GetSystemMetrics(SM_CXSMICON),
+                                               GetSystemMetrics(SM_CYSMICON), LR_DEFAULTCOLOR));
+    wc.lpszClassName = L"NitroApp";
     RegisterClassExW(&wc);
 
-    const DWORD style = WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX;
-    RECT rc{0, 0, S(580), S(654)};
-    AdjustWindowRect(&rc, style, FALSE);
-    HWND wnd = CreateWindowExW(0, wc.lpszClassName, L"Nitro - frame generation for any game",
-                               style, CW_USEDEFAULT, CW_USEDEFAULT, rc.right - rc.left, rc.bottom - rc.top,
-                               nullptr, nullptr, inst, nullptr);
-    if (!wnd) return 1;
-    ShowWindow(wnd, show);
+    const UINT dpi = GetDpiForSystem();
+    g_scale = static_cast<float>(dpi) / 96.0f;
+    RECT rc{0, 0, static_cast<LONG>(920 * g_scale), static_cast<LONG>(900 * g_scale)};
+    AdjustWindowRectExForDpi(&rc, WS_OVERLAPPEDWINDOW, FALSE, 0, dpi);
+    g_wnd = CreateWindowExW(0, wc.lpszClassName, L"Nitro", WS_OVERLAPPEDWINDOW, CW_USEDEFAULT, CW_USEDEFAULT,
+                            rc.right - rc.left, rc.bottom - rc.top, nullptr, nullptr, inst, nullptr);
+    if (!g_wnd) return 1;
 
-    MSG m;
-    while (GetMessageW(&m, nullptr, 0, 0) > 0) {
-        if (!IsDialogMessageW(wnd, &m)) {
-            TranslateMessage(&m);
-            DispatchMessageW(&m);
-        }
+    // Dark title bar matching the app (Windows 10 2004+ / 11)
+    const BOOL dark = TRUE;
+    DwmSetWindowAttribute(g_wnd, 20 /*DWMWA_USE_IMMERSIVE_DARK_MODE*/, &dark, sizeof(dark));
+    const COLORREF caption = RGB(14, 17, 36);
+    DwmSetWindowAttribute(g_wnd, 35 /*DWMWA_CAPTION_COLOR*/, &caption, sizeof(caption));
+
+    if (!CreateDeviceD3D(g_wnd)) {
+        MessageBoxW(nullptr, L"Nitro needs DirectX 11 to show its window.", L"Nitro", MB_ICONERROR);
+        return 1;
     }
-    DeleteObject(g_font);
+    ShowWindow(g_wnd, show);
+    UpdateWindow(g_wnd);
+
+    IMGUI_CHECKVERSION();
+    ImGui::CreateContext();
+    ImGuiIO& io = ImGui::GetIO();
+    io.IniFilename = nullptr;
+    io.ConfigFlags |= ImGuiConfigFlags_NavEnableKeyboard;
+    g_fonts = nitro_ui::LoadFonts(17.0f * g_scale);
+    nitro_ui::ApplyStyle(g_scale);
+    ImGui_ImplWin32_Init(g_wnd);
+    ImGui_ImplDX11_Init(g_device.Get(), g_context.Get());
+
+    LoadUi();
+    CheckLossless();
+    AnalyzeGame();
+    Log(L"Ready. Pick a game, choose a multiplier, then Install.");
+
+    bool running = true;
+    while (running) {
+        MSG msg;
+        while (PeekMessageW(&msg, nullptr, 0, 0, PM_REMOVE)) {
+            TranslateMessage(&msg);
+            DispatchMessageW(&msg);
+            if (msg.message == WM_QUIT) running = false;
+        }
+        if (!running) break;
+        if (IsIconic(g_wnd)) {
+            Sleep(50);
+            continue;
+        }
+        if (g_resizeW && g_resizeH) ResizeSwapChain();
+
+        ImGui_ImplDX11_NewFrame();
+        ImGui_ImplWin32_NewFrame();
+        ImGui::NewFrame();
+        DrawUi();
+        ImGui::Render();
+        const float clear[4] = {0.055f, 0.067f, 0.141f, 1.0f};
+        ID3D11RenderTargetView* rtv = g_rtv.Get();
+        g_context->OMSetRenderTargets(1, &rtv, nullptr);
+        g_context->ClearRenderTargetView(rtv, clear);
+        ImGui_ImplDX11_RenderDrawData(ImGui::GetDrawData());
+        g_swapChain->Present(1, 0);
+    }
+
+    SaveUi();
+    ImGui_ImplDX11_Shutdown();
+    ImGui_ImplWin32_Shutdown();
+    ImGui::DestroyContext();
     return 0;
 }

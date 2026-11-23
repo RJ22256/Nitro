@@ -15,6 +15,7 @@
 
 #include "../core/bridge.h"
 #include "../core/log.h"
+#include "../core/overlay.h"
 #include "../core/runtime.h"
 #include "hooks.h"
 
@@ -129,8 +130,11 @@ void D9State::Release() {
 
 HRESULT D9State::Present(IDirect3DDevice9* dev, const std::function<HRESULT(IDirect3DSurface9**)>& getBB,
                          const std::function<HRESULT()>& present) {
-    if (failed_ || !G().fgEnabled.load()) {
-        if (bridge_) bridge_->Reset();
+    const bool generate = G().fgEnabled.load();
+    const bool menu = OverlayVisible();
+    if (!generate && bridge_) bridge_->Reset();
+    if (failed_ || (!generate && !menu)) {
+        NoteFrame(0, "DirectX 9", w_, h_);
         return present();
     }
 
@@ -156,7 +160,15 @@ HRESULT D9State::Present(IDirect3DDevice9* dev, const std::function<HRESULT(IDir
     bridge_->Upload(lr.pBits, static_cast<UINT>(lr.Pitch));
     sysIn_->UnlockRect();
 
-    const int n = bridge_->Run();
+    bool drawMenu = false;
+    if (menu) {
+        D3DDEVICE_CREATION_PARAMETERS cp{};
+        HWND wnd = SUCCEEDED(dev->GetCreationParameters(&cp)) && cp.hFocusWindow ? cp.hFocusWindow : FindMainWindow();
+        drawMenu = OverlayBegin(bridge_->Device(), bridge_->Context(), wnd, w_, h_);
+    }
+    const int n = drawMenu ? bridge_->Run(generate, [](ID3D11DeviceContext* c, ID3D11Texture2D* t) { OverlayDraw(c, t); })
+                           : bridge_->Run(generate);
+    NoteFrame(n, "DirectX 9", w_, h_);
     for (int k = 0; k < n; ++k) {
         if (FAILED(sysOut_->LockRect(&lr, nullptr, 0))) break;
         const bool ok = bridge_->Download(k, lr.pBits, static_cast<UINT>(lr.Pitch), w_ * 4, h_);
@@ -171,10 +183,19 @@ HRESULT D9State::Present(IDirect3DDevice9* dev, const std::function<HRESULT(IDir
         if (FAILED(hr)) return hr;
     }
 
-    // Put the real frame back and present it
+    // Put the real frame back (with the menu on it, if open) and present it
     bb.Reset();
-    if (n > 0 && SUCCEEDED(getBB(&bb)))
+    if (drawMenu) {
+        if (SUCCEEDED(sysOut_->LockRect(&lr, nullptr, 0))) {
+            const bool ok = bridge_->Download(-1, lr.pBits, static_cast<UINT>(lr.Pitch), w_ * 4, h_);
+            sysOut_->UnlockRect();
+            if (ok && SUCCEEDED(dev->UpdateSurface(sysOut_.Get(), nullptr, gpuOut_.Get(), nullptr)) &&
+                SUCCEEDED(getBB(&bb)))
+                dev->StretchRect(gpuOut_.Get(), nullptr, bb.Get(), nullptr, D3DTEXF_NONE);
+        }
+    } else if (n > 0 && SUCCEEDED(getBB(&bb))) {
         dev->StretchRect(copy_.Get(), nullptr, bb.Get(), nullptr, D3DTEXF_NONE);
+    }
     bb.Reset();
     return present();
 }

@@ -51,6 +51,7 @@ void LoadConfig(const std::wstring& ini, Config& cfg) {
     cfg.enabled = ReadInt(ini, L"EnabledAtStart", cfg.enabled) != 0;
     cfg.toggleKey = ReadInt(ini, L"ToggleKey", cfg.toggleKey);
     cfg.cycleKey = ReadInt(ini, L"CycleKey", cfg.cycleKey);
+    cfg.menuKey = ReadInt(ini, L"MenuKey", cfg.menuKey);
     cfg.shaderOffset = ReadInt(ini, L"ShaderOffset", cfg.shaderOffset);
     cfg.probeD3D12 = ReadInt(ini, L"ProbeD3D12", cfg.probeD3D12) != 0;
     cfg.api = ReadString(ini, L"Api", cfg.api.c_str());
@@ -59,9 +60,10 @@ void LoadConfig(const std::wstring& ini, Config& cfg) {
 bool SaveConfig(const std::wstring& ini, const Config& cfg) {
     wchar_t flow[32];
     swprintf(flow, 32, L"%.2f", cfg.flowScale);
-    wchar_t key1[16], key2[16];
+    wchar_t key1[16], key2[16], key3[16];
     swprintf(key1, 16, L"0x%02X", cfg.toggleKey);
     swprintf(key2, 16, L"0x%02X", cfg.cycleKey);
+    swprintf(key3, 16, L"0x%02X", cfg.menuKey);
 
     bool ok = true;
     ok &= Write(ini, L"LosslessDll", cfg.losslessDll);
@@ -73,6 +75,7 @@ bool SaveConfig(const std::wstring& ini, const Config& cfg) {
     ok &= Write(ini, L"EnabledAtStart", cfg.enabled ? L"1" : L"0");
     ok &= Write(ini, L"ToggleKey", key1);
     ok &= Write(ini, L"CycleKey", key2);
+    ok &= Write(ini, L"MenuKey", key3);
     ok &= Write(ini, L"ShaderOffset", std::to_wstring(cfg.shaderOffset));
     ok &= Write(ini, L"ProbeD3D12", cfg.probeD3D12 ? L"1" : L"0");
     ok &= Write(ini, L"Api", cfg.api);

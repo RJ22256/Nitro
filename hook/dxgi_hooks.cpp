@@ -20,6 +20,7 @@
 #include "../core/bridge.h"
 #include "../core/framegen.h"
 #include "../core/log.h"
+#include "../core/overlay.h"
 #include "../core/runtime.h"
 
 namespace lsfgi {
@@ -118,7 +119,7 @@ private:
     ComPtr<ID3D10Query> query10_;
     LUID luid_{};
     std::unique_ptr<Bridge> bridge_;
-    ComPtr<ID3D10Texture2D> in10_;
+    ComPtr<ID3D10Texture2D> in10_, real10_;
     std::vector<ComPtr<ID3D10Texture2D>> out10_;
     ComPtr<ID3D11Device> dev_;
     ComPtr<ID3D11DeviceContext> ctx_;
@@ -137,8 +138,10 @@ private:
     Blitter blit_;
     bool blitReady_ = false;
     DXGI_FORMAT bbFormat_ = DXGI_FORMAT_UNKNOWN;
-    UINT w_ = 0, h_ = 0;
+    UINT w_ = 0, h_ = 0;     // current back buffer size
+    UINT fgW_ = 0, fgH_ = 0; // size the frame generator was built for
     int mult_ = 0;
+    int version_ = -1;
     bool warnedFormat_ = false;
 };
 
@@ -243,7 +246,8 @@ bool SwapState::EnsureFrameGen(const DXGI_SWAP_CHAIN_DESC& d) {
     const int mult = g.multiplier.load();
     const UINT w = d.BufferDesc.Width, h = d.BufferDesc.Height;
     const DXGI_FORMAT fmt = d.BufferDesc.Format;
-    if (fg_ && w == w_ && h == h_ && fmt == bbFormat_ && mult == mult_) return true;
+    const int version = g.settingsVersion.load();
+    if (fg_ && w == fgW_ && h == fgH_ && fmt == bbFormat_ && mult == mult_ && version == version_) return true;
 
     fg_.reset();
     FrameGenParams p;
@@ -267,8 +271,9 @@ bool SwapState::EnsureFrameGen(const DXGI_SWAP_CHAIN_DESC& d) {
         return false;
     }
     fg_ = std::move(fg);
-    w_ = w;
-    h_ = h;
+    fgW_ = w;
+    fgH_ = h;
+    version_ = version;
     bbFormat_ = fmt;
     mult_ = mult;
     Log("Frame generation ready: %ux%u, format %d, %dx, flow scale %.2f, %s mode, HDR %s", w, h,
@@ -353,6 +358,7 @@ bool SwapState::EnsureBridge10(UINT w, UINT h, DXGI_FORMAT fmt) {
     const DXGI_FORMAT view = ViewFormat(fmt);
     if (bridge_ && bridge_->Matches(w, h, view, G().multiplier.load())) return true;
     in10_.Reset();
+    real10_.Reset();
     out10_.clear();
     bridge_ = std::make_unique<Bridge>();
     BridgeParams p;
@@ -367,7 +373,8 @@ bool SwapState::EnsureBridge10(UINT w, UINT h, DXGI_FORMAT fmt) {
         bridge_.reset();
         return false;
     }
-    if (FAILED(dev10_->OpenSharedResource(bridge_->InputHandle(), IID_PPV_ARGS(&in10_)))) {
+    if (FAILED(dev10_->OpenSharedResource(bridge_->InputHandle(), IID_PPV_ARGS(&in10_))) ||
+        FAILED(dev10_->OpenSharedResource(bridge_->RealOutputHandle(), IID_PPV_ARGS(&real10_)))) {
         Log("D3D10 could not open the shared input texture");
         bridge_.reset();
         return false;
@@ -384,6 +391,10 @@ bool SwapState::EnsureBridge10(UINT w, UINT h, DXGI_FORMAT fmt) {
 }
 
 HRESULT SwapState::PresentD3D10(const PresentCall& call, const DXGI_SWAP_CHAIN_DESC& desc) {
+    const bool generate = G().fgEnabled.load();
+    const bool menu = OverlayVisible();
+    w_ = desc.BufferDesc.Width;
+    h_ = desc.BufferDesc.Height;
     if (!EnsureBridge10(desc.BufferDesc.Width, desc.BufferDesc.Height, desc.BufferDesc.Format)) {
         failed = true;
         return call.Real(call.sync, call.flags);
@@ -401,7 +412,12 @@ HRESULT SwapState::PresentD3D10(const PresentCall& call, const DXGI_SWAP_CHAIN_D
     dev10_->CopyResource(in10_.Get(), bb.Get());
     Wait10();
 
-    const int n = bridge_->Run();
+    bool drawMenu = false;
+    if (menu)
+        drawMenu = OverlayBegin(bridge_->Device(), bridge_->Context(), desc.OutputWindow, w_, h_);
+    const int n = drawMenu ? bridge_->Run(generate, [](ID3D11DeviceContext* c, ID3D11Texture2D* t) { OverlayDraw(c, t); })
+                           : bridge_->Run(generate);
+    NoteFrame(n, "DirectX 10", w_, h_);
     for (int k = 0; k < n; ++k) {
         dev10_->CopyResource(bb.Get(), out10_[k].Get());
         bb.Reset();
@@ -409,16 +425,24 @@ HRESULT SwapState::PresentD3D10(const PresentCall& call, const DXGI_SWAP_CHAIN_D
         if (FAILED(hr)) return hr;
         if (FAILED(call.sc->GetBuffer(0, IID_PPV_ARGS(&bb)))) return call.Real(sync, flags);
     }
-    if (n > 0) dev10_->CopyResource(bb.Get(), in10_.Get());
+    if (drawMenu)
+        dev10_->CopyResource(bb.Get(), real10_.Get());
+    else if (n > 0)
+        dev10_->CopyResource(bb.Get(), in10_.Get());
     bb.Reset();
     return call.Real(sync, flags);
 }
 
 HRESULT SwapState::Present(const PresentCall& call) {
     auto& g = G();
-    if (failed || !g.fgEnabled.load()) {
+    const bool generate = g.fgEnabled.load();
+    const bool menu = OverlayVisible();
+    if (!generate) {
         if (fg_) fg_->Reset();
         if (bridge_) bridge_->Reset();
+    }
+    if (failed || (!generate && !menu)) {
+        NoteFrame(0, d3d12_ ? "DirectX 12" : d3d10_ ? "DirectX 10" : "DirectX 11", w_, h_);
         return call.Real(call.sync, call.flags);
     }
 
@@ -433,7 +457,9 @@ HRESULT SwapState::Present(const PresentCall& call) {
         return call.Real(call.sync, call.flags);
     }
     if (d3d10_) return PresentD3D10(call, desc);
-    if (!EnsureFrameGen(desc)) {
+    w_ = desc.BufferDesc.Width;
+    h_ = desc.BufferDesc.Height;
+    if (generate && !EnsureFrameGen(desc)) {
         failed = true;
         return call.Real(call.sync, call.flags);
     }
@@ -452,9 +478,13 @@ HRESULT SwapState::Present(const PresentCall& call) {
     ComPtr<ID3D11Texture2D> bb;
     if (!BeginFrame(call.sc, bb)) return call.Real(call.sync, call.flags);
 
-    const int n = fg_->Process(ctx_.Get(), bb.Get());
+    const int n = generate && fg_ ? fg_->Process(ctx_.Get(), bb.Get()) : 0;
+    const char* api = d3d12_ ? "DirectX 12" : "DirectX 11";
+    NoteFrame(n, api, w_, h_);
+    const bool drawMenu = menu && OverlayBegin(dev_.Get(), ctx_.Get(), desc.OutputWindow, w_, h_);
     for (int i = 0; i < n; ++i) {
         WriteGenerated(i, bb.Get());
+        if (drawMenu) OverlayDraw(ctx_.Get(), bb.Get());
         EndFrame();
         bb.Reset();
         const HRESULT hr = call.Generated(sync, genFlags);
@@ -462,6 +492,7 @@ HRESULT SwapState::Present(const PresentCall& call) {
         if (!BeginFrame(call.sc, bb)) return call.Real(sync, flags);
     }
     if (n > 0) ctx_->CopyResource(bb.Get(), fg_->CurrentFrame()); // put the real frame back
+    if (drawMenu) OverlayDraw(ctx_.Get(), bb.Get());
     EndFrame();
     bb.Reset();
     return call.Real(sync, flags);

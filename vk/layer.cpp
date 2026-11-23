@@ -27,6 +27,7 @@
 
 #include "../core/bridge.h"
 #include "../core/log.h"
+#include "../core/overlay.h"
 #include "../core/runtime.h"
 
 namespace {
@@ -168,6 +169,8 @@ private:
     uint32_t family_ = UINT32_MAX;
     VkImage in_ = VK_NULL_HANDLE;
     VkDeviceMemory inMem_ = VK_NULL_HANDLE;
+    VkImage real_ = VK_NULL_HANDLE; // real frame with the menu drawn on it
+    VkDeviceMemory realMem_ = VK_NULL_HANDLE;
     std::vector<VkImage> outs_;
     std::vector<VkDeviceMemory> outMem_;
     VkCommandPool pool_ = VK_NULL_HANDLE;
@@ -208,6 +211,8 @@ void SwapData::Destroy() {
     if (pool_) dev->DestroyCommandPool(d, pool_, nullptr);
     if (in_) dev->DestroyImage(d, in_, nullptr);
     if (inMem_) dev->FreeMemory(d, inMem_, nullptr);
+    if (real_) dev->DestroyImage(d, real_, nullptr);
+    if (realMem_) dev->FreeMemory(d, realMem_, nullptr);
     for (VkImage i : outs_) dev->DestroyImage(d, i, nullptr);
     for (VkDeviceMemory m : outMem_) dev->FreeMemory(d, m, nullptr);
     std::memset(fence_, 0, sizeof(fence_));
@@ -218,6 +223,8 @@ void SwapData::Destroy() {
     pool_ = VK_NULL_HANDLE;
     in_ = VK_NULL_HANDLE;
     inMem_ = VK_NULL_HANDLE;
+    real_ = VK_NULL_HANDLE;
+    realMem_ = VK_NULL_HANDLE;
     outs_.clear();
     outMem_.clear();
     bridge_.reset();
@@ -354,7 +361,7 @@ bool SwapData::Ensure(VkQueue queue, uint32_t family) {
         Log("Vulkan frame generation setup failed: %s", err.c_str());
         return false;
     }
-    if (!Import(bridge_->InputHandle(), in_, inMem_)) {
+    if (!Import(bridge_->InputHandle(), in_, inMem_) || !Import(bridge_->RealOutputHandle(), real_, realMem_)) {
         Log("Could not import the shared input texture into Vulkan");
         return false;
     }
@@ -393,6 +400,8 @@ bool SwapData::Ensure(VkQueue queue, uint32_t family) {
     if (!Begin(0)) return false;
     Barrier(cmd_[0], in_, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_GENERAL, 0, 0, VK_QUEUE_FAMILY_IGNORED,
             VK_QUEUE_FAMILY_IGNORED);
+    Barrier(cmd_[0], real_, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_GENERAL, 0, 0, VK_QUEUE_FAMILY_IGNORED,
+            VK_QUEUE_FAMILY_IGNORED);
     for (VkImage o : outs_)
         Barrier(cmd_[0], o, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_GENERAL, 0, 0, VK_QUEUE_FAMILY_IGNORED,
                 VK_QUEUE_FAMILY_IGNORED);
@@ -404,8 +413,11 @@ bool SwapData::Ensure(VkQueue queue, uint32_t family) {
 }
 
 VkResult SwapData::Present(VkQueue queue, const VkPresentInfoKHR* info) {
-    if (!G().fgEnabled.load()) {
-        if (bridge_) bridge_->Reset();
+    const bool generate = G().fgEnabled.load();
+    const bool menu = OverlayVisible();
+    if (!generate && bridge_) bridge_->Reset();
+    if (!generate && !menu) {
+        NoteFrame(0, "Vulkan", extent.width, extent.height);
         return dev->QueuePresentKHR(queue, info);
     }
     auto famIt = dev->queueFamily.find(queue);
@@ -438,8 +450,12 @@ VkResult SwapData::Present(VkQueue queue, const VkPresentInfoKHR* info) {
     dev->ResetFences(dev->device, 1, &fence_[0]);
     fenceBusy_[0] = false;
 
-    // 2. run LSFG on Nitro's D3D11 device
-    const int n = bridge_->Run();
+    // 2. run LSFG on Nitro's D3D11 device (and draw the menu, if open)
+    const bool drawMenu =
+        menu && OverlayBegin(bridge_->Device(), bridge_->Context(), FindMainWindow(), extent.width, extent.height);
+    const int n = drawMenu ? bridge_->Run(generate, [](ID3D11DeviceContext* c, ID3D11Texture2D* t) { OverlayDraw(c, t); })
+                           : bridge_->Run(generate);
+    NoteFrame(n, "Vulkan", extent.width, extent.height);
 
     // 3. present each generated frame in its own swap chain image
     for (int k = 0; k < n; ++k) {
@@ -470,7 +486,26 @@ VkResult SwapData::Present(VkQueue queue, const VkPresentInfoKHR* info) {
         if (r != VK_SUCCESS && r != VK_SUBOPTIMAL_KHR) return r;
     }
 
-    // 4. present the real frame (its wait semaphores were consumed in step 1)
+    // 4. menu open: put the real frame with the menu on it into the game's image
+    if (drawMenu && Begin(0)) {
+        cb = cmd_[0];
+        Barrier(cb, real_, VK_IMAGE_LAYOUT_GENERAL, VK_IMAGE_LAYOUT_GENERAL, 0, VK_ACCESS_TRANSFER_READ_BIT, ext,
+                family);
+        Barrier(cb, images[idx], VK_IMAGE_LAYOUT_PRESENT_SRC_KHR, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 0,
+                VK_ACCESS_TRANSFER_WRITE_BIT, VK_QUEUE_FAMILY_IGNORED, VK_QUEUE_FAMILY_IGNORED);
+        Copy(cb, real_, VK_IMAGE_LAYOUT_GENERAL, images[idx], VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
+        Barrier(cb, images[idx], VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_PRESENT_SRC_KHR,
+                VK_ACCESS_TRANSFER_WRITE_BIT, 0, VK_QUEUE_FAMILY_IGNORED, VK_QUEUE_FAMILY_IGNORED);
+        Barrier(cb, real_, VK_IMAGE_LAYOUT_GENERAL, VK_IMAGE_LAYOUT_GENERAL, VK_ACCESS_TRANSFER_READ_BIT, 0, family,
+                ext);
+        if (Submit(queue, 0, 0, nullptr, 0, VK_NULL_HANDLE) == VK_SUCCESS) {
+            dev->WaitForFences(dev->device, 1, &fence_[0], VK_TRUE, UINT64_MAX);
+            dev->ResetFences(dev->device, 1, &fence_[0]);
+            fenceBusy_[0] = false;
+        }
+    }
+
+    // 5. present the real frame (its wait semaphores were consumed in step 1)
     VkPresentInfoKHR real = *info;
     real.waitSemaphoreCount = 0;
     real.pWaitSemaphores = nullptr;

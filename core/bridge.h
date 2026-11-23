@@ -9,6 +9,7 @@
 #include <d3d11.h>
 #include <wrl/client.h>
 
+#include <functional>
 #include <memory>
 #include <string>
 #include <vector>
@@ -46,13 +47,19 @@ public:
     HANDLE OutputHandle(int k) const { return outHandles_[static_cast<size_t>(k)]; }
     int MaxOutputs() const { return static_cast<int>(outs_.size()); }
 
-    // Generates frames from Input() into Output(0..n-1); waits for the GPU.
-    int Run();
+    // Generates frames from Input() into Output(0..n-1) (when generate is
+    // true), and if overlay is set draws it on every output and on
+    // RealOutput() (a copy of Input()). Waits for the GPU.
+    using OverlayFn = std::function<void(ID3D11DeviceContext*, ID3D11Texture2D*)>;
+    int Run(bool generate = true, const OverlayFn& overlay = {});
+    ID3D11Texture2D* RealOutput() const { return real_.Get(); }
+    HANDLE RealOutputHandle() const { return realHandle_; }
+    ID3D11DeviceContext* Context() const { return ctx_.Get(); }
     void Reset();
 
     // CPU path
     void Upload(const void* data, UINT pitch);
-    bool Download(int k, void* dst, UINT dstPitch, UINT bytesPerRow, UINT rows);
+    bool Download(int k, void* dst, UINT dstPitch, UINT bytesPerRow, UINT rows); // k = -1: RealOutput()
 
     ~Bridge();
 
@@ -63,13 +70,16 @@ private:
 
     BridgeParams p_;
     int mult_ = 0;
+    int version_ = -1;
     Microsoft::WRL::ComPtr<ID3D11Device> dev_;
     Microsoft::WRL::ComPtr<ID3D11DeviceContext> ctx_;
     Microsoft::WRL::ComPtr<ID3D11Query> done_;
     Microsoft::WRL::ComPtr<ID3D11Texture2D> in_;
     std::vector<Microsoft::WRL::ComPtr<ID3D11Texture2D>> outs_;
     std::vector<Microsoft::WRL::ComPtr<ID3D11Texture2D>> staging_;
+    Microsoft::WRL::ComPtr<ID3D11Texture2D> real_, realStaging_;
     HANDLE inHandle_ = nullptr;
+    HANDLE realHandle_ = nullptr;
     std::vector<HANDLE> outHandles_;
     std::unique_ptr<FrameGen> fg_;
     Blitter blit_;

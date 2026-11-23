@@ -19,6 +19,13 @@ struct Globals {
     bool ready = false; // settings + shaders loaded
     std::atomic<bool> fgEnabled{true};
     std::atomic<int> multiplier{2};
+    std::atomic<bool> menuOpen{false};
+    std::atomic<int> settingsVersion{0}; // bumped when anything needing a rebuild changes
+
+    // Live status for the in-game menu
+    const char* apiName = "";
+    UINT width = 0, height = 0;
+    float realFps = 0.0f, outputFps = 0.0f;
 };
 
 Globals& G();
@@ -29,6 +36,12 @@ bool LoadRuntime(HMODULE self, const wchar_t* logName);
 
 // Edge-triggered toggle/cycle hotkeys. Returns true if the multiplier changed.
 bool PollHotkeys();
+
+// Marks the pipeline settings as changed (multiplier, flow scale, mode, HDR).
+void BumpSettings();
+
+// Call once per real frame: generated = frames generated for it.
+void NoteFrame(int generated, const char* api, UINT width, UINT height);
 
 // Claims "this process is handled by Nitro". Only the first caller gets true,
 // so two Nitro DLLs in one game never both generate frames.

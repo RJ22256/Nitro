@@ -61,6 +61,7 @@ bool CreateD3D11DeviceOn(const LUID* luid, UINT vendorId, ComPtr<ID3D11Device>& 
 Bridge::~Bridge() {
     if (p_.share == ShareMode::NtHandle) {
         if (inHandle_) CloseHandle(inHandle_);
+        if (realHandle_) CloseHandle(realHandle_);
         for (HANDLE h : outHandles_)
             if (h) CloseHandle(h);
     }
@@ -106,6 +107,7 @@ bool Bridge::Init(const BridgeParams& p, std::string& error) {
     auto& g = G();
     p_ = p;
     mult_ = g.multiplier.load();
+    version_ = g.settingsVersion.load();
     if (!CreateD3D11DeviceOn(p.adapter, p.vendorId, dev_, ctx_)) {
         error = "could not create Nitro's D3D11 device";
         return false;
@@ -131,6 +133,7 @@ bool Bridge::Init(const BridgeParams& p, std::string& error) {
 
     const UINT bind = D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_RENDER_TARGET;
     if (!MakeShared(in_, inHandle_, bind, error)) return false;
+    if (!MakeShared(real_, realHandle_, bind, error)) return false;
     const int n = mult_ - 1;
     outs_.assign(static_cast<size_t>(n), nullptr);
     outHandles_.assign(static_cast<size_t>(n), nullptr);
@@ -148,7 +151,8 @@ bool Bridge::Init(const BridgeParams& p, std::string& error) {
 }
 
 bool Bridge::Matches(UINT w, UINT h, DXGI_FORMAT f, int multiplier) const {
-    return fg_ && w == p_.width && h == p_.height && f == p_.format && multiplier == mult_;
+    return fg_ && w == p_.width && h == p_.height && f == p_.format && multiplier == mult_ &&
+           version_ == G().settingsVersion.load();
 }
 
 void Bridge::WaitIdle() {
@@ -158,15 +162,21 @@ void Bridge::WaitIdle() {
     while (ctx_->GetData(done_.Get(), &finished, sizeof(finished), 0) == S_FALSE) SwitchToThread();
 }
 
-int Bridge::Run() {
+int Bridge::Run(bool generate, const OverlayFn& overlay) {
     if (!fg_) return 0;
-    const int n = fg_->Process(ctx_.Get(), in_.Get());
+    if (!generate) fg_->Reset();
+    const int n = generate ? fg_->Process(ctx_.Get(), in_.Get()) : 0;
     for (int k = 0; k < n; ++k) {
         const Tex& t = fg_->Generated(k);
         if (fg_->OutputFormat() == p_.format)
             ctx_->CopyResource(outs_[k].Get(), t.tex.Get());
         else
             blit_.Blit(ctx_.Get(), t.srv.Get(), outs_[k].Get(), p_.width, p_.height, false);
+        if (overlay) overlay(ctx_.Get(), outs_[k].Get());
+    }
+    if (overlay) {
+        ctx_->CopyResource(real_.Get(), in_.Get());
+        overlay(ctx_.Get(), real_.Get());
     }
     WaitIdle();
     return n;
@@ -181,17 +191,18 @@ void Bridge::Upload(const void* data, UINT pitch) {
 }
 
 bool Bridge::Download(int k, void* dst, UINT dstPitch, UINT bytesPerRow, UINT rows) {
-    auto& st = staging_[static_cast<size_t>(k)];
+    auto& st = k < 0 ? realStaging_ : staging_[static_cast<size_t>(k)];
+    ID3D11Texture2D* src = k < 0 ? real_.Get() : outs_[static_cast<size_t>(k)].Get();
     if (!st) {
         D3D11_TEXTURE2D_DESC d{};
-        outs_[k]->GetDesc(&d);
+        src->GetDesc(&d);
         d.Usage = D3D11_USAGE_STAGING;
         d.BindFlags = 0;
         d.MiscFlags = 0;
         d.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
         if (FAILED(dev_->CreateTexture2D(&d, nullptr, &st))) return false;
     }
-    ctx_->CopyResource(st.Get(), outs_[k].Get());
+    ctx_->CopyResource(st.Get(), src);
     D3D11_MAPPED_SUBRESOURCE m{};
     if (FAILED(ctx_->Map(st.Get(), 0, D3D11_MAP_READ, 0, &m))) return false;
     const UINT row = bytesPerRow < m.RowPitch ? bytesPerRow : m.RowPitch;

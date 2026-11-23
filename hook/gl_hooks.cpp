@@ -14,6 +14,7 @@
 
 #include "../core/bridge.h"
 #include "../core/log.h"
+#include "../core/overlay.h"
 #include "../core/runtime.h"
 #include "hooks.h"
 
@@ -147,8 +148,10 @@ private:
     void Blit(GLuint readFbo, GLuint drawFbo) const {
         gl.glBindFramebuffer(GL_READ_FRAMEBUFFER, readFbo);
         gl.glBindFramebuffer(GL_DRAW_FRAMEBUFFER, drawFbo);
-        gl.glBlitFramebuffer(0, 0, static_cast<GLint>(w_), static_cast<GLint>(h_), 0, 0,
-                             static_cast<GLint>(w_), static_cast<GLint>(h_), GL_COLOR_BUFFER_BIT, GL_NEAREST);
+        // Flipped both ways, so the shared texture is upright for D3D11 (the menu
+        // is drawn on it) and the picture comes back the right way round.
+        gl.glBlitFramebuffer(0, 0, static_cast<GLint>(w_), static_cast<GLint>(h_), 0, static_cast<GLint>(h_),
+                             static_cast<GLint>(w_), 0, GL_COLOR_BUFFER_BIT, GL_NEAREST);
     }
 
     std::unique_ptr<Bridge> bridge_;
@@ -157,6 +160,8 @@ private:
     HANDLE objIn_ = nullptr;
     std::vector<GLuint> texOut_, fboOut_;
     std::vector<HANDLE> objOut_;
+    GLuint texReal_ = 0, fboReal_ = 0;
+    HANDLE objReal_ = nullptr;
     UINT w_ = 0, h_ = 0;
     bool failed_ = false;
 };
@@ -164,16 +169,19 @@ private:
 void GLState::Release() {
     if (interop_) {
         if (objIn_) gl.wglDXUnregisterObjectNV(interop_, objIn_);
+        if (objReal_) gl.wglDXUnregisterObjectNV(interop_, objReal_);
         for (HANDLE h : objOut_)
             if (h) gl.wglDXUnregisterObjectNV(interop_, h);
         gl.wglDXCloseDeviceNV(interop_);
     }
     if (fboIn_) gl.glDeleteFramebuffers(1, &fboIn_);
+    if (fboReal_) gl.glDeleteFramebuffers(1, &fboReal_);
+    if (texReal_) gl.glDeleteTextures(1, &texReal_);
     if (!fboOut_.empty()) gl.glDeleteFramebuffers(static_cast<GLsizei>(fboOut_.size()), fboOut_.data());
     if (texIn_) gl.glDeleteTextures(1, &texIn_);
     if (!texOut_.empty()) gl.glDeleteTextures(static_cast<GLsizei>(texOut_.size()), texOut_.data());
-    interop_ = objIn_ = nullptr;
-    texIn_ = fboIn_ = 0;
+    interop_ = objIn_ = objReal_ = nullptr;
+    texIn_ = fboIn_ = texReal_ = fboReal_ = 0;
     texOut_.clear();
     fboOut_.clear();
     objOut_.clear();
@@ -218,7 +226,8 @@ bool GLState::Ensure(UINT w, UINT h) {
         return complete;
     };
 
-    bool ok = wrap(bridge_->Input(), texIn_, fboIn_, objIn_);
+    bool ok = wrap(bridge_->Input(), texIn_, fboIn_, objIn_) &&
+              wrap(bridge_->RealOutput(), texReal_, fboReal_, objReal_);
     const size_t n = static_cast<size_t>(bridge_->MaxOutputs());
     texOut_.assign(n, 0);
     fboOut_.assign(n, 0);
@@ -238,8 +247,11 @@ bool GLState::Ensure(UINT w, UINT h) {
 }
 
 BOOL GLState::Swap(HDC dc, BOOL(WINAPI* orig)(HDC)) {
-    if (failed_ || !G().fgEnabled.load()) {
-        if (bridge_) bridge_->Reset();
+    const bool generate = G().fgEnabled.load();
+    const bool menu = OverlayVisible();
+    if (!generate && bridge_) bridge_->Reset();
+    if (failed_ || (!generate && !menu)) {
+        NoteFrame(0, "OpenGL", w_, h_);
         return orig(dc);
     }
     RECT rc{};
@@ -268,15 +280,17 @@ BOOL GLState::Swap(HDC dc, BOOL(WINAPI* orig)(HDC)) {
         if (srgb) gl.glEnable(GL_FRAMEBUFFER_SRGB);
     };
 
-    // Real frame -> shared texture (rows end up bottom-up; we copy back the
-    // same way, so the picture comes out the right way round)
+    // Real frame -> shared texture
     prepare();
     gl.wglDXLockObjectsNV(interop_, 1, &objIn_);
     Blit(0, fboIn_);
     gl.wglDXUnlockObjectsNV(interop_, 1, &objIn_);
     restore();
 
-    const int n = bridge_->Run();
+    const bool drawMenu = menu && OverlayBegin(bridge_->Device(), bridge_->Context(), wnd, w_, h_);
+    const int n = drawMenu ? bridge_->Run(generate, [](ID3D11DeviceContext* c, ID3D11Texture2D* t) { OverlayDraw(c, t); })
+                           : bridge_->Run(generate);
+    NoteFrame(n, "OpenGL", w_, h_);
     for (int k = 0; k < n; ++k) {
         prepare();
         gl.wglDXLockObjectsNV(interop_, 1, &objOut_[k]);
@@ -285,11 +299,12 @@ BOOL GLState::Swap(HDC dc, BOOL(WINAPI* orig)(HDC)) {
         restore();
         orig(dc);
     }
-    if (n > 0) {
+    if (drawMenu || n > 0) {
+        HANDLE obj = drawMenu ? objReal_ : objIn_;
         prepare();
-        gl.wglDXLockObjectsNV(interop_, 1, &objIn_);
-        Blit(fboIn_, 0);
-        gl.wglDXUnlockObjectsNV(interop_, 1, &objIn_);
+        gl.wglDXLockObjectsNV(interop_, 1, &obj);
+        Blit(drawMenu ? fboReal_ : fboIn_, 0);
+        gl.wglDXUnlockObjectsNV(interop_, 1, &obj);
         restore();
     }
     return orig(dc);

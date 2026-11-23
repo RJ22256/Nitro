@@ -59,11 +59,45 @@ bool PollHotkeys() {
         int m = g.multiplier.load() + 1;
         if (m > 4) m = 2;
         g.multiplier = m;
+        BumpSettings();
         changed = true;
         Log("Multiplier set to %dx", m);
     }
     prevCycle = cycle;
+
+    static bool prevMenu = false;
+    const bool menu = g.cfg.menuKey && (GetAsyncKeyState(g.cfg.menuKey) & 0x8000);
+    if (menu && !prevMenu) g.menuOpen = !g.menuOpen.load();
+    prevMenu = menu;
     return changed;
+}
+
+void BumpSettings() {
+    G().settingsVersion.fetch_add(1);
+}
+
+void NoteFrame(int generated, const char* api, UINT width, UINT height) {
+    auto& g = G();
+    g.apiName = api;
+    g.width = width;
+    g.height = height;
+    static LARGE_INTEGER freq{}, start{};
+    static int real = 0, gen = 0;
+    if (!freq.QuadPart) {
+        QueryPerformanceFrequency(&freq);
+        QueryPerformanceCounter(&start);
+    }
+    ++real;
+    gen += generated;
+    LARGE_INTEGER now;
+    QueryPerformanceCounter(&now);
+    const double secs = static_cast<double>(now.QuadPart - start.QuadPart) / static_cast<double>(freq.QuadPart);
+    if (secs >= 0.5) {
+        g.realFps = static_cast<float>(real / secs);
+        g.outputFps = static_cast<float>((real + gen) / secs);
+        real = gen = 0;
+        start = now;
+    }
 }
 
 bool ClaimProcess() {

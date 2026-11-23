@@ -18,6 +18,7 @@ struct Config {
     bool enabled = true;         // start with frame gen on
     int toggleKey = VK_END;      // in-game: turn frame gen on/off
     int cycleKey = VK_HOME;      // in-game: cycle 2x -> 3x -> 4x
+    int menuKey = VK_INSERT;     // in-game: open/close the Nitro menu
     int shaderOffset = -1;       // -1 auto-detect
     bool probeD3D12 = true;      // create a throwaway D3D12 swap chain to find its vtable
     std::wstring api = L"auto"; // auto, dxgi (DX10/11/12), d3d9, opengl, all

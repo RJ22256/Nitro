@@ -30,6 +30,10 @@ SOFTWARE.
 
 NitroHook.dll statically links MinHook (https://github.com/TsudaKageyu/minhook), BSD 2-Clause licence, Copyright (C) 2009-2017 Tsuda Kageyu. Licence text: https://github.com/TsudaKageyu/minhook/blob/master/LICENSE.txt
 
+## Dear ImGui
+
+Nitro.exe, NitroHook.dll and NitroVk.dll include Dear ImGui (https://github.com/ocornut/imgui), MIT licence, Copyright (c) 2014-2024 Omar Cornut.
+
 ## Vulkan-Headers
 
 NitroVk.dll is built with the Khronos Vulkan headers (https://github.com/KhronosGroup/Vulkan-Headers), Apache License 2.0.

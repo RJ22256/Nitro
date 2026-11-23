@@ -19,12 +19,18 @@ Powered by the frame-generation algorithm from your own copy of [Lossless Scalin
 
 ---
 
+<p align="center">
+  <img src="assets/screenshot-app.png" alt="The Nitro app" width="49%">
+  <img src="assets/screenshot-ingame.png" alt="The in-game Nitro menu" width="49%">
+</p>
+
 ## ✨ Features
 
 - **2x / 3x / 4x frame generation** in 64-bit **DirectX 9, 10, 11, 12, OpenGL and Vulkan** games
 - **Detects the game's graphics API automatically**, or you can pick it yourself
 - **Runs inside the game**: no window capture, no borderless-window requirement, no overlay app running alongside
 - **Two ways to load it:** install it once (works with Steam launches), or launch the game with Nitro injected
+- **In-game menu** (<kbd>Insert</kbd>): change frame gen, the multiplier, flow scale, performance mode, VSync pacing and HDR live, see rendered and on-screen FPS, and save the settings as your default
 - **Live hotkeys:** <kbd>End</kbd> toggles frame gen, <kbd>Home</kbd> cycles 2x → 3x → 4x
 - **Quality & performance modes**, adjustable flow scale, HDR support
 - **Leaves the game's rendering state untouched:** each API gets its own path (see [How it works](#-how-it-works))
@@ -57,6 +63,16 @@ What **Install** does for each API:
 | OpenGL | Copies the hook in as `version.dll` (or `dxgi.dll`) if the game loads one; otherwise use **Launch with injection** |
 | Vulkan | Registers Nitro's Vulkan layer and switches it on **for that exe only**. Nothing is copied into the game folder. |
 
+### In game
+
+| Key | Does |
+|---|---|
+| <kbd>Insert</kbd> | Opens the Nitro menu. While it's open, the game doesn't receive your mouse and keyboard input. |
+| <kbd>End</kbd> | Turns frame generation on/off |
+| <kbd>Home</kbd> | Cycles 2x → 3x → 4x |
+
+The menu is drawn *after* frame generation, so it never gets smeared into the generated frames. **Save as default** writes your changes to `Nitro.ini`.
+
 ### Tips for smooth results
 
 | Tip | Why |
@@ -80,6 +96,7 @@ VSyncPacing=1
 EnabledAtStart=1
 ToggleKey=0x23        ; virtual-key code (End)
 CycleKey=0x24         ; (Home)
+MenuKey=0x2D          ; (Insert) opens the in-game menu
 ShaderOffset=-1       ; -1 auto-detect
 ProbeD3D12=1          ; set 0 if a DX12 game won't start with Nitro
 Api=auto              ; dxgi, d3d9, opengl, all (written by Install)
@@ -145,11 +162,11 @@ The output is in `build\dist`: `Nitro.exe`, `NitroHook.dll`, `NitroVk.dll` and `
 - 64-bit games only.
 - DX9 frames make a round trip through system memory. That's fine at 1080p but costs more at 4K.
 - OpenGL needs a driver with `WGL_NV_DX_interop2` (current NVIDIA, AMD and Intel drivers have it), and Vulkan needs `VK_KHR_external_memory_win32`.
-- No in-game overlay; settings live in the app and the hotkeys.
+- The in-game menu can only block mouse and keyboard input that the game reads through normal window messages or raw input. Games that read DirectInput directly may still react while it's open.
 - MSAA back buffers aren't supported (rare in modern games).
 
 ## Credits
 
 - Frame-generation algorithm and shaders: **Lossless Scaling** by THS. Nitro is not affiliated with or endorsed by its developer.
 - Pipeline reference: **lsfg-vk** by PancakeTAS (MIT).
-- Function hooking: **MinHook** by Tsuda Kageyu (BSD 2-Clause). Vulkan headers by **Khronos** (Apache 2.0).
+- UI: **Dear ImGui** by Omar Cornut (MIT). Function hooking: **MinHook** by Tsuda Kageyu (BSD 2-Clause). Vulkan headers by **Khronos** (Apache 2.0).
