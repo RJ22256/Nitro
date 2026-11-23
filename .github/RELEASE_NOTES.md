@@ -4,8 +4,8 @@ Adds Lossless Scaling's frame generation to 64-bit **DirectX 9, 10, 11, 12, Open
 
 ### Install
 1. Download **Nitro-x64.zip** below and unzip it anywhere.
-2. Copy `Lossless.dll` from `Steam\steamapps\common\Lossless Scaling\` into the `Nitro` folder. You need to own [Lossless Scaling](https://store.steampowered.com/app/993090/Lossless_Scaling/).
-3. Run `Nitro.exe`, pick your game's `.exe`, choose a multiplier and click **Install into game folder**. The graphics API is detected automatically.
+2. Run `Nitro.exe`. The first-run setup finds [Lossless Scaling](https://store.steampowered.com/app/993090/Lossless_Scaling/) on your PC (you need to own it) and builds its frame-gen shaders into Nitro.
+3. Pick your game's `.exe`, choose a multiplier and click **Install into game**. The graphics API is detected automatically.
 4. Start the game. Press **Insert** for the Nitro menu, **End** to toggle frame gen and **Home** to cycle 2x/3x/4x.
 
 ### Heads-up

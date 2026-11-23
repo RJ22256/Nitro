@@ -1,6 +1,7 @@
 #include "shader_extract.h"
 
 #include <cstring>
+#include <fstream>
 
 namespace lsfgi {
 
@@ -177,6 +178,11 @@ bool InspectLosslessDll(const std::wstring& path, DllReport& report, std::wstrin
 bool LoadLsfgShaders(const std::wstring& path, int offset, ShaderBlobs& out,
                      int& usedOffset, std::wstring& error) {
     out.clear();
+    if (IsShaderPack(path)) {
+        PackInfo info;
+        usedOffset = -1;
+        return LoadShaderPack(path, &out, info, error);
+    }
     DataModule module(path);
     if (!module.handle) {
         error = L"Could not open " + path + L" (error " + std::to_wstring(GetLastError()) + L")";
@@ -202,6 +208,133 @@ bool LoadLsfgShaders(const std::wstring& path, int offset, ShaderBlobs& out,
         out[s.name] = std::vector<uint8_t>(data, data + size);
     }
     return true;
+}
+
+// ---------------------------------------------------------------------------
+// Shader pack
+//
+// "NITROSH1" | u32 version | u16 n, wchar source[n] | u64 size | u64 time |
+// u64 importedAt | u32 count | count x (u16 n, char name[n], u32 n, data[n])
+
+namespace {
+
+constexpr char kPackMagic[8] = {'N', 'I', 'T', 'R', 'O', 'S', 'H', '1'};
+constexpr uint32_t kPackVersion = 1;
+
+bool FileStamp(const std::wstring& path, uint64_t& size, uint64_t& time) {
+    WIN32_FILE_ATTRIBUTE_DATA a{};
+    if (!GetFileAttributesExW(path.c_str(), GetFileExInfoStandard, &a)) return false;
+    size = (static_cast<uint64_t>(a.nFileSizeHigh) << 32) | a.nFileSizeLow;
+    time = (static_cast<uint64_t>(a.ftLastWriteTime.dwHighDateTime) << 32) | a.ftLastWriteTime.dwLowDateTime;
+    return true;
+}
+
+template <typename T>
+void Put(std::ofstream& f, T v) {
+    f.write(reinterpret_cast<const char*>(&v), sizeof(v));
+}
+
+template <typename T>
+bool Get(std::ifstream& f, T& v) {
+    return static_cast<bool>(f.read(reinterpret_cast<char*>(&v), sizeof(v)));
+}
+
+} // namespace
+
+bool IsShaderPack(const std::wstring& path) {
+    std::ifstream f(path, std::ios::binary);
+    char magic[8] = {};
+    return f.read(magic, 8) && std::memcmp(magic, kPackMagic, 8) == 0;
+}
+
+bool SaveShaderPack(const std::wstring& path, const ShaderBlobs& blobs, const std::wstring& source,
+                    std::wstring& error) {
+    const std::wstring tmp = path + L".tmp";
+    {
+        std::ofstream f(tmp, std::ios::binary | std::ios::trunc);
+        if (!f) {
+            error = L"Could not write " + path;
+            return false;
+        }
+        uint64_t size = 0, time = 0;
+        FileStamp(source, size, time);
+        FILETIME now{};
+        GetSystemTimeAsFileTime(&now);
+        f.write(kPackMagic, 8);
+        Put(f, kPackVersion);
+        Put(f, static_cast<uint16_t>(source.size()));
+        f.write(reinterpret_cast<const char*>(source.data()), static_cast<std::streamsize>(source.size() * 2));
+        Put(f, size);
+        Put(f, time);
+        Put(f, (static_cast<uint64_t>(now.dwHighDateTime) << 32) | now.dwLowDateTime);
+        Put(f, static_cast<uint32_t>(blobs.size()));
+        for (const auto& [name, data] : blobs) {
+            Put(f, static_cast<uint16_t>(name.size()));
+            f.write(name.data(), static_cast<std::streamsize>(name.size()));
+            Put(f, static_cast<uint32_t>(data.size()));
+            f.write(reinterpret_cast<const char*>(data.data()), static_cast<std::streamsize>(data.size()));
+        }
+        if (!f) {
+            error = L"Could not write " + path;
+            return false;
+        }
+    }
+    if (!MoveFileExW(tmp.c_str(), path.c_str(), MOVEFILE_REPLACE_EXISTING)) {
+        DeleteFileW(tmp.c_str());
+        error = L"Could not replace " + path;
+        return false;
+    }
+    return true;
+}
+
+bool LoadShaderPack(const std::wstring& path, ShaderBlobs* blobs, PackInfo& info, std::wstring& error) {
+    info = PackInfo{};
+    std::ifstream f(path, std::ios::binary);
+    char magic[8] = {};
+    uint32_t version = 0;
+    if (!f || !f.read(magic, 8) || std::memcmp(magic, kPackMagic, 8) != 0 || !Get(f, version) ||
+        version != kPackVersion) {
+        error = L"Not a Nitro shader pack (or from a different Nitro version)";
+        return false;
+    }
+    uint16_t n = 0;
+    if (!Get(f, n)) return error = L"Shader pack is damaged", false;
+    info.source.resize(n);
+    f.read(reinterpret_cast<char*>(info.source.data()), static_cast<std::streamsize>(n) * 2);
+    uint32_t count = 0;
+    if (!Get(f, info.sourceSize) || !Get(f, info.sourceTime) || !Get(f, info.importedAt) || !Get(f, count) ||
+        count > 1024)
+        return error = L"Shader pack is damaged", false;
+
+    ShaderBlobs local;
+    for (uint32_t i = 0; i < count; ++i) {
+        uint16_t nameLen = 0;
+        uint32_t size = 0;
+        if (!Get(f, nameLen)) return error = L"Shader pack is damaged", false;
+        std::string name(nameLen, '\0');
+        f.read(name.data(), nameLen);
+        if (!Get(f, size) || size > (64u << 20)) return error = L"Shader pack is damaged", false;
+        std::vector<uint8_t> data(size);
+        if (!f.read(reinterpret_cast<char*>(data.data()), size)) return error = L"Shader pack is damaged", false;
+        if (ClassifyBlob(data.data(), data.size()) != BlobKind::DxbcSm5)
+            return error = L"Shader pack contains an unexpected shader", false;
+        local[name] = std::move(data);
+    }
+    // Everything the quality pipeline needs must be present.
+    for (const auto& s : kShaderIds)
+        if (!s.performance && local.find(s.name) == local.end())
+            return error = L"Shader pack is incomplete - re-import from Lossless Scaling", false;
+
+    info.shaderCount = local.size();
+    info.performanceSet = local.find("p_alpha[0]") != local.end();
+    if (blobs) *blobs = std::move(local);
+    return true;
+}
+
+bool PackSourceChanged(const PackInfo& info) {
+    uint64_t size = 0, time = 0;
+    if (info.source.empty() || !FileStamp(info.source, size, time)) return false;
+    return size != info.sourceSize || time != info.sourceTime;
 }
 
 } // namespace lsfgi

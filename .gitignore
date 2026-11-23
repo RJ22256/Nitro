@@ -5,3 +5,6 @@ out/
 CMakeSettings.json
 # never commit Lossless Scaling files
 Lossless.dll
+
+# imported from your own Lossless Scaling - never commit or share
+*.shaders

@@ -9,7 +9,8 @@ namespace lsfgi {
 // Settings shared by the launcher (writes them) and the hook DLL (reads them).
 // Stored in Nitro.ini next to the hook DLL.
 struct Config {
-    std::wstring losslessDll;    // full path to the user's Lossless.dll
+    std::wstring shaders;        // Nitro.shaders pack (preferred) ...
+    std::wstring losslessDll;    // ... or the user's Lossless.dll
     int multiplier = 2;          // 2x, 3x or 4x
     float flowScale = 1.0f;      // 0.25 .. 1.0 (lower = faster, less accurate)
     bool performanceMode = false;

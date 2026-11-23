@@ -23,18 +23,22 @@ bool LoadRuntime(HMODULE self, const wchar_t* logName) {
 
     LoadConfig(g.dir + L"\\" + kConfigFileName, g.cfg);
     if (g.cfg.losslessDll.empty()) g.cfg.losslessDll = g.dir + L"\\Lossless.dll";
+    // Prefer the imported shader pack; fall back to Lossless.dll.
+    std::wstring source = g.cfg.losslessDll;
+    if (!g.cfg.shaders.empty() && GetFileAttributesW(g.cfg.shaders.c_str()) != INVALID_FILE_ATTRIBUTES)
+        source = g.cfg.shaders;
     g.multiplier = g.cfg.multiplier;
     g.fgEnabled = g.cfg.enabled;
 
     int offset = -1;
     std::wstring err;
-    if (!LoadLsfgShaders(g.cfg.losslessDll, g.cfg.shaderOffset, g.shaders, offset, err)) {
+    if (!LoadLsfgShaders(source, g.cfg.shaderOffset, g.shaders, offset, err)) {
         Log("Shader load failed: %s", Narrow(err).c_str());
         Log("Frame generation disabled - the game will run normally");
         return false;
     }
-    Log("Loaded %zu shaders from %s (resource offset %d)", g.shaders.size(),
-        Narrow(g.cfg.losslessDll).c_str(), offset);
+    Log("Loaded %zu shaders from %s", g.shaders.size(), Narrow(source).c_str());
+    (void)offset;
     if (g.cfg.performanceMode && g.shaders.find("p_alpha[0]") == g.shaders.end())
         Log("Performance-mode shaders not found; using quality mode");
     g.ready = true;

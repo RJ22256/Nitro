@@ -42,6 +42,7 @@ float ClampFlowScale(float f) {
 }
 
 void LoadConfig(const std::wstring& ini, Config& cfg) {
+    cfg.shaders = ReadString(ini, L"Shaders", cfg.shaders.c_str());
     cfg.losslessDll = ReadString(ini, L"LosslessDll", cfg.losslessDll.c_str());
     cfg.multiplier = ClampMultiplier(ReadInt(ini, L"Multiplier", cfg.multiplier));
     cfg.flowScale = ClampFlowScale(ReadFloat(ini, L"FlowScale", cfg.flowScale));
@@ -66,6 +67,7 @@ bool SaveConfig(const std::wstring& ini, const Config& cfg) {
     swprintf(key3, 16, L"0x%02X", cfg.menuKey);
 
     bool ok = true;
+    ok &= Write(ini, L"Shaders", cfg.shaders);
     ok &= Write(ini, L"LosslessDll", cfg.losslessDll);
     ok &= Write(ini, L"Multiplier", std::to_wstring(ClampMultiplier(cfg.multiplier)));
     ok &= Write(ini, L"FlowScale", flow);

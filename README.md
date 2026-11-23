@@ -37,22 +37,26 @@ Powered by the frame-generation algorithm from your own copy of [Lossless Scalin
 - **Removes cleanly**, and backs up any DLL it replaces (e.g. ReShade's `dxgi.dll`), then restores it
 
 > [!IMPORTANT]
-> Nitro ships **none** of Lossless Scaling's code or shaders. It reads them at runtime from the `Lossless.dll` in **your** Lossless Scaling install, so you need to own Lossless Scaling on Steam.
+> Nitro ships **none** of Lossless Scaling's code or shaders. Setup imports them on your own PC from **your** Lossless Scaling install, so you need to own Lossless Scaling on Steam. `Nitro.shaders` holds Lossless Scaling's work, so don't share it or upload it anywhere.
 
 > [!WARNING]
 > **Single-player games only.** Injecting into games with anti-cheat can get you banned.
 
 ## 🚀 How to use
 
-1. Download **`Nitro-x64.zip`** from [Releases](https://github.com/RJ22256/Nitro/releases) and unzip it.
-2. Copy **`Lossless.dll`** from `Steam\steamapps\common\Lossless Scaling\` into the Nitro folder.
-3. Run **`Nitro.exe`** and **Browse...** to the game's `.exe`.
+1. Download **`Nitro-x64.zip`** from [Releases](https://github.com/RJ22256/Nitro/releases) and unzip it anywhere.
+2. Run **`Nitro.exe`**. The first time, a short **setup** finds Lossless Scaling in your Steam libraries (or you can browse to it) and imports its frame-gen shaders. After that they're built into Nitro (`Nitro.shaders`, next to `Nitro.exe`), so you never have to find `Lossless.dll` again.
+3. **Browse...** to the game's `.exe`.
    For Unreal Engine games, pick `...\Binaries\Win64\*-Shipping.exe` (Nitro suggests it if it finds one).
 4. Choose a **multiplier** and, if you like, a **flow scale** (100% at 1080p, 50–75% at 1440p/4K).
 5. Leave **Graphics API** on *Auto-detect* unless the game has several renderers (e.g. a DX12/Vulkan toggle). In that case, pick the one you play with.
 6. Then either:
-   - **Install** (recommended), then start the game the normal way; or
+   - **Install into game** (recommended), then start the game the normal way; or
    - **Launch with injection**, which leaves nothing behind.
+
+<p align="center"><img src="assets/screenshot-setup.png" alt="Nitro's first-run setup" width="90%"></p>
+
+When Lossless Scaling updates, Nitro shows **Update available** on the shaders card. Click **Re-import** to pick up the new version.
 
 What **Install** does for each API:
 
@@ -87,7 +91,8 @@ Nitro writes `Nitro.ini` next to the hook. That's the game folder for an install
 
 ```ini
 [Nitro]
-LosslessDll=C:\...\Lossless.dll
+Shaders=C:\...\Nitro\Nitro.shaders   ; imported by setup
+LosslessDll=C:\...\Lossless.dll       ; used only if there's no Nitro.shaders
 Multiplier=2          ; 2-4
 FlowScale=1.00        ; 0.25-1.00
 PerformanceMode=0
@@ -111,7 +116,7 @@ Check **`Nitro.log`** first. It's written next to the hook and records whether t
 | Problem | Try |
 |---|---|
 | Game won't start after installing | **Remove from game folder**, then use **Launch with injection**. For DX12 games, try `ProbeD3D12=0`. |
-| Log says *Shader load failed* | Update Lossless Scaling and copy a fresh `Lossless.dll`. |
+| Log says *Shader load failed* | Open Nitro and click **Re-import** (or update Lossless Scaling first), then **Install** again. |
 | Log says *Unsupported back buffer* | The game uses an unusual swap-chain format or an MSAA back buffer. |
 | Vulkan game: nothing happens | Check `NitroVk.log` in the Nitro folder. If there isn't one, the game isn't enabled (run **Install** again) or another Vulkan layer is in the way. |
 | OpenGL game: log says *WGL_NV_DX_interop2 not supported* | The GPU driver can't share textures between OpenGL and D3D11. Update your driver. |
@@ -144,7 +149,7 @@ Still stuck? [Open an issue](https://github.com/RJ22256/Nitro/issues) and attach
 | **OpenGL** | `SwapBuffers` / `wglSwapBuffers` (MinHook) | `WGL_NV_DX_interop2` texture sharing with Nitro's D3D11 device |
 | **Vulkan** | Implicit Vulkan layer (`NitroVk.dll`), active only for enabled games | D3D11 textures imported with `VK_KHR_external_memory_win32`; extra `vkAcquireNextImageKHR` + `vkQueuePresentKHR` per generated frame |
 
-- **Shaders:** Lossless Scaling's own Shader Model 5 compute shaders, loaded from `Lossless.dll` and run natively, with no translation layer.
+- **Shaders:** Lossless Scaling's own Shader Model 5 compute shaders, imported once from `Lossless.dll` into `Nitro.shaders` and run natively, with no translation layer.
 - **Pipeline:** the pass layout follows [lsfg-vk](https://github.com/PancakeTAS/lsfg-vk) v1 (MIT); see [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
 
 ## 🧱 Building

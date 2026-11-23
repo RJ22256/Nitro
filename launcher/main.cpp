@@ -58,6 +58,7 @@ struct UiState {
     std::string detected;
     std::string lossStatus;
     bool perfAvailable = true;
+    bool shadersOutdated = false; // Lossless Scaling updated since the import
     std::vector<std::pair<ImVec4, std::string>> log;
     bool scrollLog = false;
 };
@@ -65,8 +66,25 @@ struct UiState {
 UiState ui;
 HWND g_wnd = nullptr;
 std::wstring g_dir;          // Nitro folder
-std::wstring g_losslessPath; // Lossless.dll that will be used
-bool g_losslessOk = false;
+std::wstring g_losslessPath; // Lossless.dll the shaders were imported from
+bool g_losslessOk = false;   // Nitro.shaders is present and valid
+
+// First-run setup
+struct FoundInstall {
+    std::wstring path;
+    bool ok = false;
+    std::string status;
+};
+struct Wizard {
+    bool active = false;
+    int step = 0; // 0 welcome, 1 find + import, 2 done
+    bool scanned = false;
+    std::vector<FoundInstall> found;
+    int selected = -1;
+    std::string error;
+    size_t imported = 0;
+    bool performance = false;
+} wiz;
 
 std::wstring W(const char* utf8) {
     const int n = MultiByteToWideChar(CP_UTF8, 0, utf8, -1, nullptr, 0);
@@ -337,43 +355,131 @@ void AnalyzeGame() {
 // ---------------------------------------------------------------------------
 // Lossless.dll
 
-std::wstring SteamLosslessPath() {
-    wchar_t steam[MAX_PATH] = {};
-    DWORD size = sizeof(steam);
-    if (RegGetValueW(HKEY_CURRENT_USER, L"Software\\Valve\\Steam", L"SteamPath", RRF_RT_REG_SZ, nullptr,
-                     steam, &size) != ERROR_SUCCESS)
-        return {};
-    std::wstring p = steam;
-    std::replace(p.begin(), p.end(), L'/', L'\\');
-    return p + L"\\steamapps\\common\\Lossless Scaling\\Lossless.dll";
+std::wstring PackPath() {
+    return g_dir + L"\\" + kShaderPackName;
 }
 
-void CheckLossless() {
-    g_losslessOk = false;
-    g_losslessPath = g_dir + L"\\Lossless.dll";
-    std::wstring where = L"injector folder";
-    if (!FileExists(g_losslessPath)) {
-        const std::wstring steam = SteamLosslessPath();
-        if (!steam.empty() && FileExists(steam)) {
-            g_losslessPath = steam;
-            where = L"your Steam install";
+std::wstring RegString(HKEY root, const wchar_t* key, const wchar_t* value) {
+    wchar_t buf[MAX_PATH] = {};
+    DWORD size = sizeof(buf);
+    if (RegGetValueW(root, key, value, RRF_RT_REG_SZ, nullptr, buf, &size) != ERROR_SUCCESS) return {};
+    std::wstring p = buf;
+    std::replace(p.begin(), p.end(), L'/', L'\\');
+    return p;
+}
+
+// Every Steam library folder on this PC (from libraryfolders.vdf).
+std::vector<std::wstring> SteamLibraries() {
+    std::vector<std::wstring> roots;
+    for (const std::wstring& steam :
+         {RegString(HKEY_CURRENT_USER, L"Software\\Valve\\Steam", L"SteamPath"),
+          RegString(HKEY_LOCAL_MACHINE, L"SOFTWARE\\WOW6432Node\\Valve\\Steam", L"InstallPath"),
+          std::wstring(L"C:\\Program Files (x86)\\Steam")}) {
+        if (steam.empty()) continue;
+        roots.push_back(steam);
+        std::ifstream vdf(steam + L"\\steamapps\\libraryfolders.vdf");
+        std::string line;
+        while (std::getline(vdf, line)) {
+            const size_t key = line.find("\"path\"");
+            if (key == std::string::npos) continue;
+            const size_t a = line.find('"', key + 6);
+            const size_t b = a == std::string::npos ? a : line.find('"', a + 1);
+            if (b == std::string::npos) continue;
+            std::string path = line.substr(a + 1, b - a - 1);
+            std::string clean;
+            for (size_t i = 0; i < path.size(); ++i) {
+                if (path[i] == '\\' && i + 1 < path.size() && path[i + 1] == '\\') ++i;
+                clean.push_back(path[i]);
+            }
+            roots.push_back(W(clean.c_str()));
         }
     }
+    return roots;
+}
 
+void AddCandidate(std::vector<FoundInstall>& list, const std::wstring& dll) {
+    if (!FileExists(dll)) return;
+    for (const auto& f : list)
+        if (_wcsicmp(f.path.c_str(), dll.c_str()) == 0) return;
+    FoundInstall f;
+    f.path = dll;
     DllReport report;
     std::wstring err;
-    std::wstring status;
-    if (!FileExists(g_losslessPath)) {
-        status = L"Not found. Copy Lossless.dll from Steam\\steamapps\\common\\Lossless Scaling\\ into the Nitro folder.";
-    } else if (!InspectLosslessDll(g_losslessPath, report, err)) {
-        status = err;
+    f.ok = InspectLosslessDll(dll, report, err);
+    f.status = f.ok ? (std::to_string(report.dxbc) + " shaders" +
+                       (report.performanceSet ? " \xC2\xB7 performance mode" : ""))
+                    : U(err);
+    list.push_back(f);
+}
+
+void ScanForLossless() {
+    wiz.found.clear();
+    wiz.selected = -1;
+    wiz.error.clear();
+    for (const std::wstring& lib : SteamLibraries())
+        AddCandidate(wiz.found, lib + L"\\steamapps\\common\\Lossless Scaling\\Lossless.dll");
+    AddCandidate(wiz.found, g_dir + L"\\Lossless.dll");
+    for (size_t i = 0; i < wiz.found.size(); ++i)
+        if (wiz.found[i].ok) {
+            wiz.selected = static_cast<int>(i);
+            break;
+        }
+    wiz.scanned = true;
+}
+
+void BrowseForLossless() {
+    wchar_t file[MAX_PATH] = L"Lossless.dll";
+    OPENFILENAMEW ofn{};
+    ofn.lStructSize = sizeof(ofn);
+    ofn.hwndOwner = g_wnd;
+    ofn.lpstrFilter = L"Lossless.dll\0Lossless.dll\0DLL files (*.dll)\0*.dll\0";
+    ofn.lpstrFile = file;
+    ofn.nMaxFile = MAX_PATH;
+    ofn.lpstrTitle = L"Find Lossless.dll in your Lossless Scaling folder";
+    ofn.Flags = OFN_FILEMUSTEXIST | OFN_PATHMUSTEXIST | OFN_NOCHANGEDIR;
+    if (!GetOpenFileNameW(&ofn)) return;
+    AddCandidate(wiz.found, file);
+    for (size_t i = 0; i < wiz.found.size(); ++i)
+        if (_wcsicmp(wiz.found[i].path.c_str(), file) == 0) wiz.selected = static_cast<int>(i);
+}
+
+// Reads Nitro.shaders and updates the status shown in the app.
+void CheckLossless() {
+    PackInfo info;
+    std::wstring err;
+    g_losslessOk = LoadShaderPack(PackPath(), nullptr, info, err);
+    g_losslessPath = info.source;
+    ui.shadersOutdated = g_losslessOk && PackSourceChanged(info);
+    if (g_losslessOk) {
+        ui.lossStatus = "Imported from Lossless Scaling \xC2\xB7 " + std::to_string(info.shaderCount) +
+                        " shaders \xC2\xB7 performance mode " + (info.performanceSet ? "available" : "unavailable");
+        ui.perfAvailable = info.performanceSet;
     } else {
-        g_losslessOk = true;
-        status = L"Found in " + where + L" \u00B7 " + std::to_wstring(report.dxbc) + L" shaders \u00B7 performance mode " +
-                 (report.performanceSet ? L"available" : L"unavailable");
+        ui.lossStatus = "Not set up yet. Run setup to import the frame-gen shaders from Lossless Scaling.";
+        ui.perfAvailable = true;
     }
-    ui.lossStatus = U(status);
-    ui.perfAvailable = !g_losslessOk || report.performanceSet;
+}
+
+bool ImportShaders(const std::wstring& dll) {
+    ShaderBlobs blobs;
+    int offset = -1;
+    std::wstring err;
+    if (!LoadLsfgShaders(dll, -1, blobs, offset, err) || !SaveShaderPack(PackPath(), blobs, dll, err)) {
+        wiz.error = U(err);
+        return false;
+    }
+    wiz.imported = blobs.size();
+    wiz.performance = blobs.find("p_alpha[0]") != blobs.end();
+    CheckLossless();
+    LogOk(L"Imported " + std::to_wstring(blobs.size()) + L" frame-gen shaders from " + dll);
+    return g_losslessOk;
+}
+
+void StartSetup(int step) {
+    wiz = Wizard{};
+    wiz.active = true;
+    wiz.step = step;
+    if (step == 1) ScanForLossless();
 }
 
 // ---------------------------------------------------------------------------
@@ -384,6 +490,7 @@ std::wstring IniPath() { return g_dir + L"\\" + kConfigFileName; }
 Config ConfigFromUi() {
     Config c;
     LoadConfig(IniPath(), c); // keep advanced keys (hotkeys etc.) the user may have edited
+    c.shaders = PackPath();
     c.losslessDll = g_losslessPath;
     c.multiplier = ClampMultiplier(ui.multiplier);
     c.flowScale = static_cast<float>(ui.flowPct) / 100.0f;
@@ -442,7 +549,8 @@ bool Preflight(std::wstring& exe, Api& api) {
     }
     CheckLossless();
     if (!g_losslessOk) {
-        LogErr(L"Lossless.dll is missing or unusable - see the Lossless.dll card.");
+        StartSetup(1);
+        LogErr(L"Nitro isn't set up with Lossless Scaling yet - running setup.");
         return false;
     }
     api = ChosenApi(exe);
@@ -824,8 +932,184 @@ void KeyRow(const char* key, const char* what) {
     ImGui::TextUnformatted(what);
 }
 
+void CenteredText(const char* text, ImVec4 color, float wrap) {
+    const ImVec2 size = ImGui::CalcTextSize(text, nullptr, false, wrap);
+    ImGui::SetCursorPosX(ImGui::GetCursorPosX() + (ImGui::GetContentRegionAvail().x - size.x) * 0.5f);
+    ImGui::PushTextWrapPos(ImGui::GetCursorPosX() + wrap);
+    ImGui::TextColored(color, "%s", text);
+    ImGui::PopTextWrapPos();
+}
+
+void StepDots(int step) {
+    const float s = g_scale;
+    const float r = 4.5f * s, gap = 18 * s;
+    const float w = gap * 2;
+    ImVec2 p = ImGui::GetCursorScreenPos();
+    p.x += (ImGui::GetContentRegionAvail().x - w) * 0.5f;
+    ImDrawList* dl = ImGui::GetWindowDrawList();
+    for (int i = 0; i < 3; ++i)
+        dl->AddCircleFilled(ImVec2(p.x + gap * static_cast<float>(i), p.y + r), i == step ? r * 1.25f : r,
+                            i == step ? nitro_ui::kCyan : IM_COL32(52, 60, 110, 255));
+    ImGui::Dummy(ImVec2(0, r * 2 + 4 * s));
+}
+
+void DrawSetup() {
+    const float s = g_scale;
+    const ImGuiViewport* vp = ImGui::GetMainViewport();
+    ImGui::SetNextWindowPos(vp->WorkPos);
+    ImGui::SetNextWindowSize(vp->WorkSize);
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowRounding, 0.0f);
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowBorderSize, 0.0f);
+    ImGui::Begin("##setup", nullptr,
+                 ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoSavedSettings);
+    ImGui::PopStyleVar(2);
+
+    const float cardW = (std::min)(600 * s, vp->WorkSize.x - 48 * s);
+    const float cardH = 560 * s;
+    ImGui::SetCursorPos(ImVec2((vp->WorkSize.x - cardW) * 0.5f, (std::max)(24 * s, (vp->WorkSize.y - cardH) * 0.5f)));
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(36 * s, 30 * s));
+    ImGui::BeginChild("##setupcard", ImVec2(cardW, cardH), ImGuiChildFlags_Borders | ImGuiChildFlags_AlwaysUseWindowPadding);
+    ImGui::PopStyleVar();
+    const float inner = ImGui::GetContentRegionAvail().x;
+    StepDots(wiz.step);
+    ImGui::Spacing();
+
+    if (wiz.step == 0) {
+        const float logo = 132 * s;
+        ImGui::SetCursorPosX(ImGui::GetCursorPosX() + (inner - logo) * 0.5f);
+        nitro_ui::DrawLogo(ImGui::GetWindowDrawList(), ImGui::GetCursorScreenPos(), logo);
+        ImGui::Dummy(ImVec2(logo, logo));
+        ImGui::Spacing();
+        ImGui::PushFont(g_fonts.title);
+        const char* title = "Welcome to Nitro";
+        ImGui::SetCursorPosX(ImGui::GetCursorPosX() + (inner - ImGui::CalcTextSize(title).x) * 0.5f);
+        ImGui::PopFont();
+        GradientText(g_fonts.title, title);
+        ImGui::Spacing();
+        CenteredText("Nitro adds Lossless Scaling's frame generation to your games, at up to 4x.", nitro_ui::kText,
+                     inner);
+        ImGui::Spacing();
+        CenteredText("Setup imports the frame-gen shaders from your copy of Lossless Scaling once. After that "
+                     "they're built into Nitro, so you never have to find Lossless.dll again.",
+                     nitro_ui::kMuted, inner * 0.92f);
+        ImGui::Spacing();
+        ImGui::PushFont(g_fonts.caption);
+        CenteredText("You need Lossless Scaling from Steam. Nothing is downloaded or uploaded.", nitro_ui::kMuted,
+                     inner);
+        ImGui::PopFont();
+        ImGui::SetCursorPosY(cardH - 30 * s - 50 * s);
+        ImGui::PushFont(g_fonts.bold);
+        if (nitro_ui::AccentButton("Get started", ImVec2(inner, 50 * s))) StartSetup(1);
+        ImGui::PopFont();
+    } else if (wiz.step == 1) {
+        GradientText(g_fonts.title, "Find Lossless Scaling");
+        ImGui::TextColored(nitro_ui::kMuted, "Nitro looked in every Steam library on this PC.");
+        ImGui::Spacing();
+        const float listH = 210 * s;
+        ImGui::BeginChild("##found", ImVec2(inner, listH), ImGuiChildFlags_Borders);
+        if (wiz.found.empty()) {
+            ImGui::TextColored(nitro_ui::kWarn, "Lossless Scaling wasn't found automatically.");
+            ImGui::PushTextWrapPos(0);
+            ImGui::TextColored(nitro_ui::kMuted,
+                               "Install it from Steam and press Scan again, or use Browse to point at Lossless.dll "
+                               "in its folder.");
+            ImGui::PopTextWrapPos();
+        }
+        for (size_t i = 0; i < wiz.found.size(); ++i) {
+            const FoundInstall& f = wiz.found[i];
+            ImGui::PushID(static_cast<int>(i));
+            const ImVec2 p = ImGui::GetCursorScreenPos();
+            const float rowH = 58 * s;
+            const bool sel = wiz.selected == static_cast<int>(i);
+            if (ImGui::InvisibleButton("##row", ImVec2(ImGui::GetContentRegionAvail().x, rowH)) && f.ok)
+                wiz.selected = static_cast<int>(i);
+            ImDrawList* dl = ImGui::GetWindowDrawList();
+            const ImVec2 q(p.x + ImGui::GetItemRectSize().x, p.y + rowH);
+            dl->AddRectFilled(p, q, sel ? IM_COL32(122, 92, 255, 60) : (ImGui::IsItemHovered() ? IM_COL32(42, 49, 94, 255) : IM_COL32(29, 34, 66, 255)), 10 * s);
+            if (sel) dl->AddRect(p, q, nitro_ui::kViolet, 10 * s, 0, 1.5f * s);
+            ImGui::SetCursorScreenPos(ImVec2(p.x + 14 * s, p.y + 8 * s));
+            ImGui::BeginGroup();
+            {
+                // "Steam library D:\Games\Steam" reads better than the whole path to the DLL
+                const std::wstring tail = L"\\steamapps\\common\\Lossless Scaling\\Lossless.dll";
+                std::wstring label = f.path;
+                if (label.size() > tail.size() &&
+                    _wcsicmp(label.c_str() + label.size() - tail.size(), tail.c_str()) == 0)
+                    label = L"Steam library  " + label.substr(0, label.size() - tail.size());
+                ImGui::PushClipRect(p, ImVec2(q.x - 10 * s, q.y), true);
+                ImGui::TextUnformatted(U(label).c_str());
+                ImGui::PopClipRect();
+            }
+            ImGui::PushFont(g_fonts.caption);
+            ImGui::TextColored(f.ok ? nitro_ui::kGood : nitro_ui::kBad, "%s", f.status.c_str());
+            ImGui::PopFont();
+            ImGui::EndGroup();
+            ImGui::SetCursorScreenPos(ImVec2(p.x, q.y + 6 * s));
+            ImGui::Dummy(ImVec2(0, 0));
+            ImGui::PopID();
+        }
+        ImGui::EndChild();
+        if (nitro_ui::GhostButton("Browse...", ImVec2(130 * s, 0))) BrowseForLossless();
+        ImGui::SameLine();
+        if (nitro_ui::GhostButton("Scan again", ImVec2(130 * s, 0))) ScanForLossless();
+        if (!wiz.error.empty()) {
+            ImGui::PushTextWrapPos(0);
+            ImGui::TextColored(nitro_ui::kBad, "%s", wiz.error.c_str());
+            ImGui::PopTextWrapPos();
+        }
+        ImGui::SetCursorPosY(cardH - 30 * s - 50 * s);
+        const bool canImport = wiz.selected >= 0 && wiz.found[static_cast<size_t>(wiz.selected)].ok;
+        const float backW = 120 * s;
+        if (nitro_ui::GhostButton("Back", ImVec2(backW, 50 * s))) wiz.step = 0;
+        ImGui::SameLine();
+        ImGui::BeginDisabled(!canImport);
+        ImGui::PushFont(g_fonts.bold);
+        if (nitro_ui::AccentButton("Import shaders", ImVec2(ImGui::GetContentRegionAvail().x, 50 * s)) && canImport &&
+            ImportShaders(wiz.found[static_cast<size_t>(wiz.selected)].path))
+            wiz.step = 2;
+        ImGui::PopFont();
+        ImGui::EndDisabled();
+    } else {
+        ImGui::Dummy(ImVec2(0, 20 * s));
+        const float r = 46 * s;
+        const ImVec2 c(ImGui::GetCursorScreenPos().x + inner * 0.5f, ImGui::GetCursorScreenPos().y + r);
+        ImDrawList* dl = ImGui::GetWindowDrawList();
+        dl->AddCircleFilled(c, r, IM_COL32(77, 224, 168, 40));
+        dl->AddCircle(c, r, IM_COL32(77, 224, 168, 255), 0, 3 * s);
+        const ImVec2 tick[] = {{c.x - 20 * s, c.y + 1 * s}, {c.x - 6 * s, c.y + 15 * s}, {c.x + 22 * s, c.y - 14 * s}};
+        dl->AddPolyline(tick, 3, IM_COL32(77, 224, 168, 255), 0, 5 * s);
+        ImGui::Dummy(ImVec2(0, r * 2 + 12 * s));
+        ImGui::PushFont(g_fonts.title);
+        const char* title = "You're all set";
+        ImGui::SetCursorPosX(ImGui::GetCursorPosX() + (inner - ImGui::CalcTextSize(title).x) * 0.5f);
+        ImGui::PopFont();
+        GradientText(g_fonts.title, title);
+        ImGui::Spacing();
+        char line[128];
+        snprintf(line, sizeof(line), "%zu frame-gen shaders are now built into Nitro.", wiz.imported);
+        CenteredText(line, nitro_ui::kText, inner);
+        CenteredText(wiz.performance ? "Quality and performance modes are both available."
+                                     : "Quality mode is available (this Lossless Scaling has no performance mode).",
+                     nitro_ui::kMuted, inner);
+        ImGui::Spacing();
+        ImGui::PushFont(g_fonts.caption);
+        CenteredText("If Lossless Scaling updates, Nitro will tell you so you can re-import.", nitro_ui::kMuted, inner);
+        ImGui::PopFont();
+        ImGui::SetCursorPosY(cardH - 30 * s - 50 * s);
+        ImGui::PushFont(g_fonts.bold);
+        if (nitro_ui::AccentButton("Open Nitro", ImVec2(inner, 50 * s))) wiz.active = false;
+        ImGui::PopFont();
+    }
+    ImGui::EndChild();
+    ImGui::End();
+}
+
 void DrawUi() {
     const float s = g_scale;
+    if (wiz.active) {
+        DrawSetup();
+        return;
+    }
     const ImGuiViewport* vp = ImGui::GetMainViewport();
     ImGui::SetNextWindowPos(vp->WorkPos);
     ImGui::SetNextWindowSize(vp->WorkSize);
@@ -959,13 +1243,23 @@ void DrawUi() {
     ImGui::BeginGroup();
     const float lossH = 158 * s;
     if (BeginCard("##loss", ImVec2(colW, lossH))) {
-        CardTitle("Lossless.dll");
+        CardTitle("Frame-gen shaders");
         ImGui::SameLine();
-        nitro_ui::Chip(g_losslessOk ? "Ready" : "Missing", g_losslessOk ? nitro_ui::kGood : nitro_ui::kBad);
+        if (!g_losslessOk)
+            nitro_ui::Chip("Not set up", nitro_ui::kBad);
+        else if (ui.shadersOutdated)
+            nitro_ui::Chip("Update available", nitro_ui::kWarn);
+        else
+            nitro_ui::Chip("Built in", nitro_ui::kGood);
         ImGui::PushTextWrapPos(0);
-        ImGui::TextColored(nitro_ui::kMuted, "%s", ui.lossStatus.c_str());
+        if (ui.shadersOutdated)
+            ImGui::TextColored(nitro_ui::kWarn, "Lossless Scaling was updated since the import. Re-import to use the new version.");
+        else
+            ImGui::TextColored(nitro_ui::kMuted, "%s", ui.lossStatus.c_str());
         ImGui::PopTextWrapPos();
-        if (nitro_ui::GhostButton("Re-check", ImVec2(110 * s, 0))) CheckLossless();
+        if (g_losslessOk ? nitro_ui::GhostButton("Re-import", ImVec2(110 * s, 0))
+                         : nitro_ui::AccentButton("Run setup", ImVec2(110 * s, ImGui::GetFrameHeight())))
+            StartSetup(1);
         ImGui::SameLine();
         if (nitro_ui::GhostButton("Open Nitro folder", ImVec2(170 * s, 0)))
             ShellExecuteW(nullptr, L"open", g_dir.c_str(), nullptr, nullptr, SW_SHOWNORMAL);
@@ -1106,6 +1400,11 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE, LPWSTR, int show) {
     LoadUi();
     CheckLossless();
     AnalyzeGame();
+    if (!g_losslessOk) {
+        StartSetup(0); // first run: set up with Lossless Scaling
+    } else if (ui.shadersOutdated) {
+        Log(L"Lossless Scaling was updated - use Re-import to pick up the new shaders.", nitro_ui::kWarn);
+    }
     Log(L"Ready. Pick a game, choose a multiplier, then Install.");
 
     bool running = true;
