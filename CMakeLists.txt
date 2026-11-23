@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.20)
-project(Nitro LANGUAGES CXX ASM_MASM)
+project(Nitro LANGUAGES CXX ASM_MASM RC)
 
 if(NOT MSVC)
     message(FATAL_ERROR "Build with Visual Studio 2022 (MSVC), x64.")
@@ -41,6 +41,7 @@ set_target_properties(NitroHook PROPERTIES
 # Launcher GUI
 add_executable(Nitro WIN32
     launcher/main.cpp
+    launcher/nitro.rc
     common/config.cpp
     common/shader_extract.cpp
 )

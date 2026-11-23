@@ -1,6 +1,8 @@
 <div align="center">
 
-# ⚡ Nitro
+<img src="assets/nitro-logo.png" alt="Nitro logo" width="160">
+
+# Nitro
 
 **Frame generation for any DirectX 11 / 12 game: 2x, 3x or 4x, injected straight into the game.**
 
