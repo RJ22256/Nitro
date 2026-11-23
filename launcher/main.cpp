@@ -601,6 +601,22 @@ bool Preflight(std::wstring& exe, Api& api) {
         return false;
     }
     api = ChosenApi(exe);
+    if (ui.api != 0) {
+        // A forced API the game doesn't use means Nitro never loads (e.g.
+        // DirectX 9 on a DirectX 12 game). Fall back to the detected one.
+        std::wstring label;
+        const Api detected = DetectApi(exe, label);
+        const std::vector<std::string> imp = FolderImports(exe);
+        const bool uses = api == Api::Dxgi     ? detected == Api::Dxgi || Has(imp, "dxgi.dll")
+                          : api == Api::D3D9   ? Has(imp, "d3d9.dll")
+                          : api == Api::OpenGL ? Has(imp, "opengl32.dll")
+                                               : Has(imp, "vulkan-1.dll");
+        if (detected != Api::Unknown && detected != api && !uses) {
+            LogErr(std::wstring(L"The API box says ") + ApiName(api) + L", but this game uses " + label +
+                   L". Using " + ApiName(detected) + L" instead - set the API box back to Auto.");
+            api = detected;
+        }
+    }
     const bool is32 = info.x86;
     const wchar_t* need = api == Api::Vulkan ? (is32 ? kVkDll32 : kVkDll) : (is32 ? kHookDll32 : kHookDll);
     if (!FileExists(g_dir + L"\\" + need)) {
