@@ -67,8 +67,8 @@ Fonts LoadFonts(float px) {
     if (!f.bold) f.bold = f.body;
     f.title = Load("segoeuib.ttf", px * 2.4f);
     if (!f.title) f.title = f.bold;
-    f.small = Load("segoeui.ttf", px * 0.82f);
-    if (!f.small) f.small = f.body;
+    f.caption = Load("segoeui.ttf", px * 0.82f);
+    if (!f.caption) f.caption = f.body;
     ImGui::GetIO().FontDefault = f.body;
     return f;
 }

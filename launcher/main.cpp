@@ -847,7 +847,7 @@ void DrawUi() {
         ImGui::BeginGroup();
         GradientText(g_fonts.title, "NITRO");
         ImGui::TextColored(nitro_ui::kMuted, "Frame generation for any game \xC2\xB7 powered by your Lossless Scaling");
-        ImGui::PushFont(g_fonts.small);
+        ImGui::PushFont(g_fonts.caption);
         const char* chips[] = {"DirectX 9", "DirectX 10", "DirectX 11", "DirectX 12", "OpenGL", "Vulkan"};
         for (int i = 0; i < 6; ++i) {
             if (i) ImGui::SameLine(0, 6 * s);
@@ -950,7 +950,7 @@ void DrawUi() {
             const char* items[] = {"Auto-detect", "DirectX 10 / 11 / 12", "DirectX 9", "OpenGL", "Vulkan"};
             changed |= ImGui::Combo("##api", &ui.api, items, 5);
         }
-        ImGui::PushFont(g_fonts.small);
+        ImGui::PushFont(g_fonts.caption);
         ImGui::TextColored(nitro_ui::kMuted, "Lower flow scale = faster. Try 50-75%% at 1440p / 4K.");
         ImGui::PopFont();
     }
@@ -976,7 +976,7 @@ void DrawUi() {
         KeyRow("Insert", "Open the Nitro menu");
         KeyRow("End", "Frame generation on / off");
         KeyRow("Home", "Cycle 2x / 3x / 4x");
-        ImGui::PushFont(g_fonts.small);
+        ImGui::PushFont(g_fonts.caption);
         ImGui::PushTextWrapPos(0);
         ImGui::TextColored(nitro_ui::kMuted,
                            "Cap the game at refresh rate \xC3\xB7 multiplier for the smoothest result "
@@ -1005,7 +1005,7 @@ void DrawUi() {
     // ---- Log
     const float footer = ImGui::GetTextLineHeightWithSpacing() + 4 * s;
     if (BeginCard("##log", ImVec2(avail, (std::max)(90 * s, ImGui::GetContentRegionAvail().y - footer)))) {
-        ImGui::PushFont(g_fonts.small);
+        ImGui::PushFont(g_fonts.caption);
         for (const auto& [color, line] : ui.log) {
             ImGui::PushTextWrapPos(0);
             ImGui::TextColored(color, "%s", line.c_str());
@@ -1018,7 +1018,7 @@ void DrawUi() {
         ImGui::PopFont();
     }
     ImGui::EndChild();
-    ImGui::PushFont(g_fonts.small);
+    ImGui::PushFont(g_fonts.caption);
     ImGui::TextColored(nitro_ui::kMuted,
                        "Single-player games only \xC2\xB7 Not affiliated with Lossless Scaling \xC2\xB7 Logs: Nitro.log "
                        "(game folder) or NitroVk.log (Nitro folder)");

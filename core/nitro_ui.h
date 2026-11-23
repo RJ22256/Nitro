@@ -19,7 +19,7 @@ struct Fonts {
     ImFont* body = nullptr;
     ImFont* bold = nullptr;
     ImFont* title = nullptr;
-    ImFont* small = nullptr;
+    ImFont* caption = nullptr;
 };
 
 // Loads Segoe UI (falls back to ImGui's built-in font) at the given pixel size.

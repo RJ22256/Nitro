@@ -160,7 +160,7 @@ void BuildMenu() {
         ImGui::Dummy(ts);
     }
     ImGui::PopFont();
-    ImGui::PushFont(g_fonts.small);
+    ImGui::PushFont(g_fonts.caption);
     ImGui::TextColored(nitro_ui::kMuted, "%s  \xC2\xB7  %ux%u", g.apiName, g.width, g.height);
     ImGui::PopFont();
     ImGui::EndGroup();
@@ -168,7 +168,7 @@ void BuildMenu() {
     {
         char closeHint[48];
         snprintf(closeHint, sizeof(closeHint), "%s to close", KeyName(g.cfg.menuKey));
-        ImGui::PushFont(g_fonts.small);
+        ImGui::PushFont(g_fonts.caption);
         const float w = ImGui::CalcTextSize(closeHint).x + 20 * s;
         nitro_ui::SameLineRight(w);
         nitro_ui::Chip(closeHint, nitro_ui::kMuted);
@@ -188,7 +188,7 @@ void BuildMenu() {
         snprintf(out, sizeof(out), "%.0f", g.fgEnabled.load() ? g.outputFps : g.realFps);
         ImGui::SetCursorScreenPos(ImVec2(b0.x + 16 * s, b0.y + 8 * s));
         ImGui::BeginGroup();
-        ImGui::PushFont(g_fonts.small);
+        ImGui::PushFont(g_fonts.caption);
         ImGui::TextColored(nitro_ui::kMuted, "Rendered");
         ImGui::PopFont();
         ImGui::PushFont(g_fonts.bold);
@@ -197,7 +197,7 @@ void BuildMenu() {
         ImGui::EndGroup();
         ImGui::SetCursorScreenPos(ImVec2(b0.x + bw * 0.5f, b0.y + 8 * s));
         ImGui::BeginGroup();
-        ImGui::PushFont(g_fonts.small);
+        ImGui::PushFont(g_fonts.caption);
         ImGui::TextColored(nitro_ui::kMuted, "On screen");
         ImGui::PopFont();
         ImGui::PushFont(g_fonts.bold);
@@ -280,7 +280,7 @@ void BuildMenu() {
     ImGui::SameLine();
     if (nitro_ui::GhostButton("Close", ImVec2(bw, 36 * s))) g.menuOpen = false;
 
-    ImGui::PushFont(g_fonts.small);
+    ImGui::PushFont(g_fonts.caption);
     if (g_savedAt && GetTickCount64() - g_savedAt < 2500)
         ImGui::TextColored(nitro_ui::kGood, "Saved. These settings load next time.");
     else
