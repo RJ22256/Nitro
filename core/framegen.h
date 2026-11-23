@@ -56,9 +56,12 @@ public:
     bool Init(ID3D11Device* device, const FrameGenParams& params, const ShaderBlobs& shaders,
               std::string& error);
 
-    // Copies the finished real frame out of the back buffer and runs the whole
-    // pipeline. Returns how many generated frames are ready (0 while warming up).
-    int Process(ID3D11DeviceContext* ctx, ID3D11Resource* backbuffer);
+    // Copies the finished real frame out of the back buffer and runs the
+    // pipeline. Generates `gens` frames at times (i+1)/denom between the
+    // previous and this real frame (gens < 0: the full multiplier). Returns how
+    // many generated frames are ready (0 while warming up).
+    int Process(ID3D11DeviceContext* ctx, ID3D11Resource* backbuffer, int gens = -1, int denom = 0);
+    int MaxGenerated() const { return gens_; }
 
     const Tex& Generated(int i) const { return outs_[static_cast<size_t>(i)]; }
     // Copy of the real frame captured by the last Process() call.
@@ -95,6 +98,7 @@ private:
     bool MakeTexArray(std::vector<Tex>& v, size_t count, UINT w, UINT h, DXGI_FORMAT fmt);
     ComPtr<ID3D11Buffer> MakeConstants(float timestamp, bool firstIter, bool firstIterS);
     ID3D11ComputeShader* S(const char* name) const;
+    ID3D11Buffer* Cb(int pass, int kind) const;
 
     void Run(ID3D11DeviceContext* c, ID3D11ComputeShader* cs, ID3D11Buffer* cb,
              std::initializer_list<ID3D11SamplerState*> samplers, const List& srvs,
@@ -119,7 +123,9 @@ private:
     std::map<std::string, ComPtr<ID3D11ComputeShader>> cs_;
     ComPtr<ID3D11SamplerState> sBlack_, sWhite_, sClamp_;
     ComPtr<ID3D11Buffer> cbDefault_, cbBeta_;
-    std::vector<std::array<ComPtr<ID3D11Buffer>, 3>> cbPass_; // [pass][plain, firstIter, firstIterS]
+    // [denominator 2..4][pass][plain, firstIter, firstIterS]; timestamp = (pass+1)/denominator
+    std::array<std::array<std::array<ComPtr<ID3D11Buffer>, 3>, 3>, 3> cbPass_;
+    int denom_ = 2;
 
     std::array<Tex, 2> frames_;
     std::array<Tex, 7> mips_;

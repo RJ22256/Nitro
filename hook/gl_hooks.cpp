@@ -288,8 +288,9 @@ BOOL GLState::Swap(HDC dc, BOOL(WINAPI* orig)(HDC)) {
     restore();
 
     const bool drawMenu = menu && OverlayBegin(bridge_->Device(), bridge_->Context(), wnd, w_, h_);
-    const int n = drawMenu ? bridge_->Run(generate, [](ID3D11DeviceContext* c, ID3D11Texture2D* t) { OverlayDraw(c, t); })
-                           : bridge_->Run(generate);
+    const FramePlan plan = PlanFrame(wnd);
+    const int n = bridge_->Run(generate, drawMenu ? Bridge::OverlayFn([](ID3D11DeviceContext* c, ID3D11Texture2D* t) { OverlayDraw(c, t); }) : Bridge::OverlayFn{},
+                               plan.gens, plan.denom);
     NoteFrame(n, "OpenGL", w_, h_);
     for (int k = 0; k < n; ++k) {
         prepare();

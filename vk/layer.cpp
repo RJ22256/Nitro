@@ -453,8 +453,9 @@ VkResult SwapData::Present(VkQueue queue, const VkPresentInfoKHR* info) {
     // 2. run LSFG on Nitro's D3D11 device (and draw the menu, if open)
     const bool drawMenu =
         menu && OverlayBegin(bridge_->Device(), bridge_->Context(), FindMainWindow(), extent.width, extent.height);
-    const int n = drawMenu ? bridge_->Run(generate, [](ID3D11DeviceContext* c, ID3D11Texture2D* t) { OverlayDraw(c, t); })
-                           : bridge_->Run(generate);
+    const FramePlan plan = PlanFrame(nullptr); // refresh rate of the foreground window's monitor
+    const int n = bridge_->Run(generate, drawMenu ? Bridge::OverlayFn([](ID3D11DeviceContext* c, ID3D11Texture2D* t) { OverlayDraw(c, t); }) : Bridge::OverlayFn{},
+                               plan.gens, plan.denom);
     NoteFrame(n, "Vulkan", extent.width, extent.height);
 
     // 3. present each generated frame in its own swap chain image

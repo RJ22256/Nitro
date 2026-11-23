@@ -47,6 +47,7 @@ void LoadConfig(const std::wstring& ini, Config& cfg) {
     cfg.multiplier = ClampMultiplier(ReadInt(ini, L"Multiplier", cfg.multiplier));
     cfg.flowScale = ClampFlowScale(ReadFloat(ini, L"FlowScale", cfg.flowScale));
     cfg.performanceMode = ReadInt(ini, L"PerformanceMode", cfg.performanceMode) != 0;
+    cfg.dynamic = ReadInt(ini, L"Dynamic", cfg.dynamic) != 0;
     cfg.hdr = ReadInt(ini, L"HDR", cfg.hdr);
     cfg.vsyncPacing = ReadInt(ini, L"VSyncPacing", cfg.vsyncPacing) != 0;
     cfg.enabled = ReadInt(ini, L"EnabledAtStart", cfg.enabled) != 0;
@@ -72,6 +73,7 @@ bool SaveConfig(const std::wstring& ini, const Config& cfg) {
     ok &= Write(ini, L"Multiplier", std::to_wstring(ClampMultiplier(cfg.multiplier)));
     ok &= Write(ini, L"FlowScale", flow);
     ok &= Write(ini, L"PerformanceMode", cfg.performanceMode ? L"1" : L"0");
+    ok &= Write(ini, L"Dynamic", cfg.dynamic ? L"1" : L"0");
     ok &= Write(ini, L"HDR", std::to_wstring(cfg.hdr));
     ok &= Write(ini, L"VSyncPacing", cfg.vsyncPacing ? L"1" : L"0");
     ok &= Write(ini, L"EnabledAtStart", cfg.enabled ? L"1" : L"0");

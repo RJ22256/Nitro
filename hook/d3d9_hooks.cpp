@@ -166,8 +166,9 @@ HRESULT D9State::Present(IDirect3DDevice9* dev, const std::function<HRESULT(IDir
         HWND wnd = SUCCEEDED(dev->GetCreationParameters(&cp)) && cp.hFocusWindow ? cp.hFocusWindow : FindMainWindow();
         drawMenu = OverlayBegin(bridge_->Device(), bridge_->Context(), wnd, w_, h_);
     }
-    const int n = drawMenu ? bridge_->Run(generate, [](ID3D11DeviceContext* c, ID3D11Texture2D* t) { OverlayDraw(c, t); })
-                           : bridge_->Run(generate);
+    const FramePlan plan = PlanFrame(nullptr); // refresh rate of the foreground window's monitor
+    const int n = bridge_->Run(generate, drawMenu ? Bridge::OverlayFn([](ID3D11DeviceContext* c, ID3D11Texture2D* t) { OverlayDraw(c, t); }) : Bridge::OverlayFn{},
+                               plan.gens, plan.denom);
     NoteFrame(n, "DirectX 9", w_, h_);
     for (int k = 0; k < n; ++k) {
         if (FAILED(sysOut_->LockRect(&lr, nullptr, 0))) break;

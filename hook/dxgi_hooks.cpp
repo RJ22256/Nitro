@@ -415,8 +415,9 @@ HRESULT SwapState::PresentD3D10(const PresentCall& call, const DXGI_SWAP_CHAIN_D
     bool drawMenu = false;
     if (menu)
         drawMenu = OverlayBegin(bridge_->Device(), bridge_->Context(), desc.OutputWindow, w_, h_);
-    const int n = drawMenu ? bridge_->Run(generate, [](ID3D11DeviceContext* c, ID3D11Texture2D* t) { OverlayDraw(c, t); })
-                           : bridge_->Run(generate);
+    const FramePlan plan = PlanFrame(desc.OutputWindow);
+    const int n = bridge_->Run(generate, drawMenu ? Bridge::OverlayFn([](ID3D11DeviceContext* c, ID3D11Texture2D* t) { OverlayDraw(c, t); }) : Bridge::OverlayFn{},
+                               plan.gens, plan.denom);
     NoteFrame(n, "DirectX 10", w_, h_);
     for (int k = 0; k < n; ++k) {
         dev10_->CopyResource(bb.Get(), out10_[k].Get());
@@ -478,7 +479,8 @@ HRESULT SwapState::Present(const PresentCall& call) {
     ComPtr<ID3D11Texture2D> bb;
     if (!BeginFrame(call.sc, bb)) return call.Real(call.sync, call.flags);
 
-    const int n = generate && fg_ ? fg_->Process(ctx_.Get(), bb.Get()) : 0;
+    const FramePlan plan = PlanFrame(desc.OutputWindow);
+    const int n = generate && fg_ ? fg_->Process(ctx_.Get(), bb.Get(), plan.gens, plan.denom) : 0;
     const char* api = d3d12_ ? "DirectX 12" : "DirectX 11";
     NoteFrame(n, api, w_, h_);
     const bool drawMenu = menu && OverlayBegin(dev_.Get(), ctx_.Get(), desc.OutputWindow, w_, h_);

@@ -26,6 +26,7 @@ struct Globals {
     const char* apiName = "";
     UINT width = 0, height = 0;
     float realFps = 0.0f, outputFps = 0.0f;
+    float refreshHz = 0.0f;
 };
 
 Globals& G();
@@ -39,6 +40,15 @@ bool PollHotkeys();
 
 // Marks the pipeline settings as changed (multiplier, flow scale, mode, HDR).
 void BumpSettings();
+
+// How many frames to generate for the real frame being presented now, and
+// at which in-between times ((i+1)/denom). Fixed mode: multiplier - 1.
+// Dynamic mode: enough to fill the display refreshes this frame took.
+struct FramePlan {
+    int gens = 0;
+    int denom = 2;
+};
+FramePlan PlanFrame(HWND window);
 
 // Call once per real frame: generated = frames generated for it.
 void NoteFrame(int generated, const char* api, UINT width, UINT height);

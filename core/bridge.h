@@ -51,7 +51,7 @@ public:
     // true), and if overlay is set draws it on every output and on
     // RealOutput() (a copy of Input()). Waits for the GPU.
     using OverlayFn = std::function<void(ID3D11DeviceContext*, ID3D11Texture2D*)>;
-    int Run(bool generate = true, const OverlayFn& overlay = {});
+    int Run(bool generate = true, const OverlayFn& overlay = {}, int gens = -1, int denom = 0);
     ID3D11Texture2D* RealOutput() const { return real_.Get(); }
     HANDLE RealOutputHandle() const { return realHandle_; }
     ID3D11DeviceContext* Context() const { return ctx_.Get(); }

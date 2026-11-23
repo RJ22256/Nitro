@@ -142,6 +142,10 @@ ComPtr<ID3D11Buffer> FrameGen::MakeConstants(float timestamp, bool firstIter, bo
     return buf;
 }
 
+ID3D11Buffer* FrameGen::Cb(int pass, int kind) const {
+    return cbPass_[static_cast<size_t>(denom_ - 2)][static_cast<size_t>(pass)][static_cast<size_t>(kind)].Get();
+}
+
 ID3D11ComputeShader* FrameGen::S(const char* name) const {
     std::string key = name;
     if (p_.performance && key != "mipmaps" && key != "generate") key = "p_" + key;
@@ -195,13 +199,13 @@ bool FrameGen::Init(ID3D11Device* device, const FrameGenParams& params,
     // Constant buffers
     cbDefault_ = MakeConstants(0.0f, false, false);
     cbBeta_ = MakeConstants(0.5f, false, false);
-    cbPass_.assign(static_cast<size_t>(gens_), {});
-    for (int p = 0; p < gens_; ++p) {
-        const float t = static_cast<float>(p + 1) / static_cast<float>(gens_ + 1);
-        cbPass_[p][0] = MakeConstants(t, false, false);
-        cbPass_[p][1] = MakeConstants(t, true, false);
-        cbPass_[p][2] = MakeConstants(t, false, true);
-    }
+    for (int d = 2; d <= 4; ++d)
+        for (int p = 0; p < d - 1; ++p) {
+            const float t = static_cast<float>(p + 1) / static_cast<float>(d);
+            cbPass_[d - 2][p][0] = MakeConstants(t, false, false);
+            cbPass_[d - 2][p][1] = MakeConstants(t, true, false);
+            cbPass_[d - 2][p][2] = MakeConstants(t, false, true);
+        }
     if (!cbDefault_ || !cbBeta_) return error = "constant buffer", false;
 
     const UINT W = p_.width, H = p_.height;
@@ -377,7 +381,7 @@ void FrameGen::RunBeta(ID3D11DeviceContext* c, uint64_t fc) {
 void FrameGen::RunGamma(ID3D11DeviceContext* c, int i, int pass, uint64_t fc) {
     Gamma& g = gamma_[i];
     const Alpha& a = alpha_[6 - i];
-    ID3D11Buffer* cb = cbPass_[pass][g.opt ? 0 : 1].Get();
+    ID3D11Buffer* cb = Cb(pass, g.opt ? 0 : 1);
     const UINT gx = Groups(g.t1[0].w, 3), gy = Groups(g.t1[0].h, 3);
     List s, u;
 
@@ -408,7 +412,7 @@ void FrameGen::RunDelta(ID3D11DeviceContext* c, int j, int pass, uint64_t fc) {
     const int i = j + 4;
     Delta& d = delta_[j];
     const Alpha& a = alpha_[6 - i];
-    ID3D11Buffer* cb = cbPass_[pass][d.opt1 ? 0 : 2].Get();
+    ID3D11Buffer* cb = Cb(pass, d.opt1 ? 0 : 2);
     const UINT gx = Groups(d.t1[0].w, 3), gy = Groups(d.t1[0].h, 3);
     List s, u;
 
@@ -463,18 +467,22 @@ void FrameGen::RunGenerate(ID3D11DeviceContext* c, int pass, uint64_t fc) {
     const Tex* cur = &frames_[fc % 2];
     List s = {prev, cur, &gamma_[6].out, &delta_[2].out1, &delta_[2].out2};
     List u = {&outs_[static_cast<size_t>(pass)]};
-    Run(c, S("generate"), cbPass_[pass][0].Get(), {sBlack_.Get(), sClamp_.Get()}, s, u,
+    Run(c, S("generate"), Cb(pass, 0), {sBlack_.Get(), sClamp_.Get()}, s, u,
         Groups(p_.width, 4), Groups(p_.height, 4));
 }
 
-int FrameGen::Process(ID3D11DeviceContext* c, ID3D11Resource* backbuffer) {
+int FrameGen::Process(ID3D11DeviceContext* c, ID3D11Resource* backbuffer, int gens, int denom) {
     const uint64_t fc = frameIdx_;
+    if (gens < 0 || gens > gens_) gens = gens_;
+    if (denom < gens + 1) denom = gens + 1;
+    denom_ = denom < 2 ? 2 : (denom > 4 ? 4 : denom);
+    if (gens > denom_ - 1) gens = denom_ - 1;
     c->CopyResource(frames_[fc % 2].tex.Get(), backbuffer);
 
     RunMipmaps(c, fc);
     for (int i = 6; i >= 0; --i) RunAlpha(c, alpha_[i], fc);
     RunBeta(c, fc);
-    for (int pass = 0; pass < gens_; ++pass) {
+    for (int pass = 0; pass < gens; ++pass) {
         for (int i = 0; i < 7; ++i) {
             RunGamma(c, i, pass, fc);
             if (i >= 4) RunDelta(c, i - 4, pass, fc);
@@ -490,7 +498,7 @@ int FrameGen::Process(ID3D11DeviceContext* c, ID3D11Resource* backbuffer) {
 
     frameIdx_++;
     // The motion pipeline keeps a 3-frame history; wait until it is filled.
-    return fc >= 2 ? gens_ : 0;
+    return fc >= 2 ? gens : 0;
 }
 
 } // namespace lsfgi

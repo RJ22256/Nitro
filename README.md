@@ -26,7 +26,8 @@ Powered by the frame-generation algorithm from your own copy of [Lossless Scalin
 
 ## ✨ Features
 
-- **2x / 3x / 4x frame generation** in 64-bit **DirectX 9, 10, 11, 12, OpenGL and Vulkan** games
+- **Fixed 2x / 3x / 4x or Dynamic mode**, which automatically generates just enough frames to reach your monitor's refresh rate
+- Frame generation in 64-bit **DirectX 9, 10, 11, 12, OpenGL and Vulkan** games
 - **Detects the game's graphics API automatically**, or you can pick it yourself
 - **Runs inside the game**: no window capture, no borderless-window requirement, no overlay app running alongside
 - **Two ways to load it:** install it once (works with Steam launches), or launch the game with Nitro injected
@@ -48,7 +49,11 @@ Powered by the frame-generation algorithm from your own copy of [Lossless Scalin
 2. Run **`Nitro.exe`**. The first time, a short **setup** finds Lossless Scaling in your Steam libraries (or you can browse to it) and imports its frame-gen shaders. After that they're built into Nitro (`Nitro.shaders`, next to `Nitro.exe`), so you never have to find `Lossless.dll` again.
 3. **Browse...** to the game's `.exe`.
    For Unreal Engine games, pick `...\Binaries\Win64\*-Shipping.exe` (Nitro suggests it if it finds one).
-4. Choose a **multiplier** and, if you like, a **flow scale** (100% at 1080p, 50–75% at 1440p/4K).
+4. Choose a **mode**:
+   - **Fixed**: always 2x, 3x or 4x.
+   - **Dynamic**: Nitro measures each real frame and generates only as many frames as it takes to fill your monitor's refresh rate, up to the multiplier you pick. For example, 60 FPS on a 144 Hz screen averages 2.4x by alternating 2x and 3x. If the game already reaches your refresh rate, nothing is generated.
+
+   Then pick a **flow scale** if you like (100% at 1080p, 50–75% at 1440p/4K).
 5. Leave **Graphics API** on *Auto-detect* unless the game has several renderers (e.g. a DX12/Vulkan toggle). In that case, pick the one you play with.
 6. Then either:
    - **Install into game** (recommended), then start the game the normal way; or
@@ -81,8 +86,9 @@ The menu is drawn *after* frame generation, so it never gets smeared into the ge
 
 | Tip | Why |
 |---|---|
+| Try **Dynamic** mode first | No FPS cap needed. It aims just under your refresh rate so the game is never held back. |
 | Keep **"Pace generated frames with VSync"** on | Each frame gets its own refresh, so a 240 Hz screen at 4x shows 60 real + 180 generated frames |
-| Cap the game at **refresh rate ÷ multiplier** | Gives even frame pacing (e.g. 60 FPS on 240 Hz for 4x) |
+| In **Fixed** mode, cap the game at **refresh rate ÷ multiplier** | Gives even frame pacing (e.g. 60 FPS on 240 Hz for 4x) |
 | Have **≥ 40–60 real FPS** before generating frames | Like any frame generation, it adds about one frame of latency and needs good input frames |
 
 ## ⚙️ Settings
@@ -96,6 +102,7 @@ LosslessDll=C:\...\Lossless.dll       ; used only if there's no Nitro.shaders
 Multiplier=2          ; 2-4
 FlowScale=1.00        ; 0.25-1.00
 PerformanceMode=0
+Dynamic=0             ; 1 = top up to the refresh rate (Multiplier becomes the maximum)
 HDR=-1                ; -1 auto, 0 off, 1 on
 VSyncPacing=1
 EnabledAtStart=1

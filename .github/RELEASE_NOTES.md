@@ -1,6 +1,6 @@
 ## Nitro — first release 🚀
 
-Adds Lossless Scaling's frame generation to 64-bit **DirectX 9, 10, 11, 12, OpenGL and Vulkan** single-player games at **2x, 3x or 4x**. It runs inside the game's own rendering, so there's no window capture and no overlay.
+Adds Lossless Scaling's frame generation to 64-bit **DirectX 9, 10, 11, 12, OpenGL and Vulkan** single-player games at **2x, 3x or 4x**, or in **Dynamic** mode, which tops your frame rate up to your monitor's refresh rate. It runs inside the game's own rendering, so there's no window capture and no overlay.
 
 ### Install
 1. Download **Nitro-x64.zip** below and unzip it anywhere.

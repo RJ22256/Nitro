@@ -50,6 +50,7 @@ struct UiState {
     int multiplier = 2;
     int flowPct = 100;
     bool performance = false;
+    bool dynamic = false;
     bool vsync = true;
     int hdr = 0; // 0 auto, 1 on, 2 off
     int api = 0; // 0 auto, 1 DXGI, 2 D3D9, 3 OpenGL, 4 Vulkan
@@ -495,6 +496,7 @@ Config ConfigFromUi() {
     c.multiplier = ClampMultiplier(ui.multiplier);
     c.flowScale = static_cast<float>(ui.flowPct) / 100.0f;
     c.performanceMode = ui.performance;
+    c.dynamic = ui.dynamic;
     c.vsyncPacing = ui.vsync;
     c.hdr = ui.hdr == 1 ? 1 : (ui.hdr == 2 ? 0 : -1);
     c.api = L"auto";
@@ -521,6 +523,7 @@ void LoadUi() {
     ui.multiplier = ClampMultiplier(c.multiplier);
     ui.flowPct = static_cast<int>(c.flowScale * 100.0f + 0.5f);
     ui.performance = c.performanceMode;
+    ui.dynamic = c.dynamic;
     ui.vsync = c.vsyncPacing;
     ui.hdr = c.hdr < 0 ? 0 : (c.hdr ? 1 : 2);
 }
@@ -1184,11 +1187,25 @@ void DrawUi() {
 
     // ---- Two columns
     const float colW = (avail - gap) * 0.5f;
-    const float colH = 352 * s;
+    const float colH = 400 * s;
     if (BeginCard("##fg", ImVec2(colW, colH))) {
         CardTitle("Frame generation");
         const float toggleW = ImGui::GetFrameHeight() * 0.85f * 1.85f;
-        nitro_ui::RowLabel("Multiplier");
+        nitro_ui::RowLabel("Mode");
+        {
+            const float pw = 100 * s;
+            nitro_ui::SameLineRight(pw * 2 + 8 * s);
+            if (nitro_ui::Pill("Fixed", !ui.dynamic, ImVec2(pw, ImGui::GetFrameHeight()))) {
+                ui.dynamic = false;
+                changed = true;
+            }
+            ImGui::SameLine(0, 8 * s);
+            if (nitro_ui::Pill("Dynamic", ui.dynamic, ImVec2(pw, ImGui::GetFrameHeight()))) {
+                ui.dynamic = true;
+                changed = true;
+            }
+        }
+        nitro_ui::RowLabel(ui.dynamic ? "Up to" : "Multiplier");
         {
             const float pw = 64 * s;
             nitro_ui::SameLineRight(pw * 3 + 8 * s * 2);
@@ -1235,13 +1252,20 @@ void DrawUi() {
             changed |= ImGui::Combo("##api", &ui.api, items, 5);
         }
         ImGui::PushFont(g_fonts.caption);
-        ImGui::TextColored(nitro_ui::kMuted, "Lower flow scale = faster. Try 50-75%% at 1440p / 4K.");
+        ImGui::PushTextWrapPos(0);
+        if (ui.dynamic)
+            ImGui::TextColored(nitro_ui::kMuted,
+                               "Dynamic fills your monitor's refresh rate: it generates only as many frames as needed, "
+                               "up to the multiplier.");
+        else
+            ImGui::TextColored(nitro_ui::kMuted, "Lower flow scale = faster. Try 50-75%% at 1440p / 4K.");
+        ImGui::PopTextWrapPos();
         ImGui::PopFont();
     }
     ImGui::EndChild();
     ImGui::SameLine(0, gap);
     ImGui::BeginGroup();
-    const float lossH = 158 * s;
+    const float lossH = 176 * s;
     if (BeginCard("##loss", ImVec2(colW, lossH))) {
         CardTitle("Frame-gen shaders");
         ImGui::SameLine();
@@ -1272,9 +1296,14 @@ void DrawUi() {
         KeyRow("Home", "Cycle 2x / 3x / 4x");
         ImGui::PushFont(g_fonts.caption);
         ImGui::PushTextWrapPos(0);
-        ImGui::TextColored(nitro_ui::kMuted,
-                           "Cap the game at refresh rate \xC3\xB7 multiplier for the smoothest result "
-                           "(e.g. 60 FPS on 240 Hz at 4x).");
+        if (ui.dynamic)
+            ImGui::TextColored(nitro_ui::kMuted,
+                               "Dynamic mode needs no FPS cap: Nitro tops up whatever the game renders to your "
+                               "monitor's refresh rate.");
+        else
+            ImGui::TextColored(nitro_ui::kMuted,
+                               "Cap the game at refresh rate \xC3\xB7 multiplier for the smoothest result "
+                               "(e.g. 60 FPS on 240 Hz at 4x).");
         ImGui::PopTextWrapPos();
         ImGui::PopFont();
     }
@@ -1334,7 +1363,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
     case WM_GETMINMAXINFO: {
         auto* mm = reinterpret_cast<MINMAXINFO*>(lp);
         mm->ptMinTrackSize.x = static_cast<LONG>(860 * g_scale);
-        mm->ptMinTrackSize.y = static_cast<LONG>(820 * g_scale);
+        mm->ptMinTrackSize.y = static_cast<LONG>(860 * g_scale);
         return 0;
     }
     case WM_SYSCOMMAND:
@@ -1368,7 +1397,7 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE, LPWSTR, int show) {
 
     const UINT dpi = GetDpiForSystem();
     g_scale = static_cast<float>(dpi) / 96.0f;
-    RECT rc{0, 0, static_cast<LONG>(920 * g_scale), static_cast<LONG>(900 * g_scale)};
+    RECT rc{0, 0, static_cast<LONG>(920 * g_scale), static_cast<LONG>(940 * g_scale)};
     AdjustWindowRectExForDpi(&rc, WS_OVERLAPPEDWINDOW, FALSE, 0, dpi);
     g_wnd = CreateWindowExW(0, wc.lpszClassName, L"Nitro", WS_OVERLAPPEDWINDOW, CW_USEDEFAULT, CW_USEDEFAULT,
                             rc.right - rc.left, rc.bottom - rc.top, nullptr, nullptr, inst, nullptr);

@@ -117,6 +117,76 @@ bool ClaimProcess() {
     return true;
 }
 
+namespace {
+
+double Now() {
+    static LARGE_INTEGER freq{};
+    if (!freq.QuadPart) QueryPerformanceFrequency(&freq);
+    LARGE_INTEGER t;
+    QueryPerformanceCounter(&t);
+    return static_cast<double>(t.QuadPart) / static_cast<double>(freq.QuadPart);
+}
+
+// Refresh rate of the monitor showing the window (re-read once a second).
+float RefreshRate(HWND window) {
+    static double lastCheck = -10.0;
+    static float hz = 60.0f;
+    const double now = Now();
+    if (now - lastCheck < 1.0) return hz;
+    lastCheck = now;
+    HMONITOR mon = MonitorFromWindow(window ? window : GetForegroundWindow(), MONITOR_DEFAULTTOPRIMARY);
+    MONITORINFOEXW mi{};
+    mi.cbSize = sizeof(mi);
+    DEVMODEW dm{};
+    dm.dmSize = sizeof(dm);
+    if (mon && GetMonitorInfoW(mon, &mi) && EnumDisplaySettingsW(mi.szDevice, ENUM_CURRENT_SETTINGS, &dm) &&
+        dm.dmDisplayFrequency > 1)
+        hz = static_cast<float>(dm.dmDisplayFrequency);
+    return hz;
+}
+
+} // namespace
+
+FramePlan PlanFrame(HWND window) {
+    auto& g = G();
+    const int maxMult = g.multiplier.load();
+    FramePlan plan;
+    const float hz = RefreshRate(window);
+    g.refreshHz = hz;
+    if (!g.cfg.dynamic) {
+        plan.gens = maxMult - 1;
+        plan.denom = maxMult;
+        return plan;
+    }
+
+    // Dynamic: how many refreshes did this real frame span? Smooth the frame
+    // time a little, aim just under the refresh rate (so we never hold the
+    // game back), and carry the fraction over so e.g. 2.4x alternates 2x/3x.
+    static double last = 0.0, smooth = 0.0, carry = 0.0;
+    const double now = Now();
+    double dt = last > 0.0 ? now - last : 0.0;
+    last = now;
+    if (dt <= 0.0 || dt > 0.25) { // first frame, or a hitch/loading screen
+        smooth = 0.0;
+        carry = 0.0;
+        plan.gens = 0;
+        plan.denom = 2;
+        return plan;
+    }
+    smooth = smooth > 0.0 ? smooth * 0.85 + dt * 0.15 : dt;
+    const double refreshes = smooth * hz * 0.98 + carry;
+    int ticks = static_cast<int>(refreshes);
+    carry = refreshes - ticks;
+    if (ticks > maxMult) {
+        ticks = maxMult;
+        carry = 0.0;
+    }
+    if (ticks < 1) ticks = 1;
+    plan.gens = ticks - 1;
+    plan.denom = ticks < 2 ? 2 : ticks;
+    return plan;
+}
+
 bool& InHook() {
     thread_local bool inHook = false;
     return inHook;

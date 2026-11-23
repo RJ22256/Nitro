@@ -162,10 +162,10 @@ void Bridge::WaitIdle() {
     while (ctx_->GetData(done_.Get(), &finished, sizeof(finished), 0) == S_FALSE) SwitchToThread();
 }
 
-int Bridge::Run(bool generate, const OverlayFn& overlay) {
+int Bridge::Run(bool generate, const OverlayFn& overlay, int gens, int denom) {
     if (!fg_) return 0;
     if (!generate) fg_->Reset();
-    const int n = generate ? fg_->Process(ctx_.Get(), in_.Get()) : 0;
+    const int n = generate ? fg_->Process(ctx_.Get(), in_.Get(), gens, denom) : 0;
     for (int k = 0; k < n; ++k) {
         const Tex& t = fg_->Generated(k);
         if (fg_->OutputFormat() == p_.format)

@@ -198,7 +198,11 @@ void BuildMenu() {
         ImGui::SetCursorScreenPos(ImVec2(b0.x + bw * 0.5f, b0.y + 8 * s));
         ImGui::BeginGroup();
         ImGui::PushFont(g_fonts.caption);
-        ImGui::TextColored(nitro_ui::kMuted, "On screen");
+        if (g.cfg.dynamic && g.fgEnabled.load() && g.realFps > 0.5f)
+            ImGui::TextColored(nitro_ui::kMuted, "On screen \xC2\xB7 %.1fx of %.0f Hz", g.outputFps / g.realFps,
+                               g.refreshHz);
+        else
+            ImGui::TextColored(nitro_ui::kMuted, "On screen");
         ImGui::PopFont();
         ImGui::PushFont(g_fonts.bold);
         ImGui::TextColored(ImVec4(0.0f, 0.898f, 1.0f, 1.0f), "%s fps", out);
@@ -217,8 +221,23 @@ void BuildMenu() {
     nitro_ui::SameLineRight(toggleW);
     if (nitro_ui::Toggle("##fg", &enabled)) g.fgEnabled = enabled;
 
+    nitro_ui::RowLabel("Mode");
+    {
+        const float pw = 88 * s, ph = ImGui::GetFrameHeight();
+        nitro_ui::SameLineRight(pw * 2 + 8 * s);
+        if (nitro_ui::Pill("Fixed", !g.cfg.dynamic, ImVec2(pw, ph)) && g.cfg.dynamic) {
+            g.cfg.dynamic = false;
+            BumpSettings();
+        }
+        ImGui::SameLine(0, 8 * s);
+        if (nitro_ui::Pill("Dynamic", g.cfg.dynamic, ImVec2(pw, ph)) && !g.cfg.dynamic) {
+            g.cfg.dynamic = true;
+            BumpSettings();
+        }
+    }
+
     snprintf(hint, sizeof(hint), "(%s)", KeyName(g.cfg.cycleKey));
-    nitro_ui::RowLabel("Multiplier", hint);
+    nitro_ui::RowLabel(g.cfg.dynamic ? "Up to" : "Multiplier", hint);
     {
         const float pw = 56 * s, ph = ImGui::GetFrameHeight();
         nitro_ui::SameLineRight(pw * 3 + 8 * s * 2);

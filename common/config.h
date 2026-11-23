@@ -14,6 +14,7 @@ struct Config {
     int multiplier = 2;          // 2x, 3x or 4x
     float flowScale = 1.0f;      // 0.25 .. 1.0 (lower = faster, less accurate)
     bool performanceMode = false;
+    bool dynamic = false;        // generate as many frames as needed to reach the refresh rate (multiplier = max)
     int hdr = -1;                // -1 auto, 0 off, 1 on
     bool vsyncPacing = true;     // present every frame with vsync so the display paces them
     bool enabled = true;         // start with frame gen on
