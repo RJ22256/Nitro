@@ -26,13 +26,18 @@ using namespace lsfgi;
 namespace {
 
 constexpr wchar_t kHookDll[] = L"NitroHook.dll";
-constexpr wchar_t kProxyName[] = L"dxgi.dll";
-constexpr wchar_t kBackupName[] = L"dxgi.dll.nitro-backup";
+constexpr wchar_t kVkDll[] = L"NitroVk.dll";
+constexpr wchar_t kVkManifest[] = L"NitroVk.json";
+constexpr wchar_t kBackupSuffix[] = L".nitro-backup";
+constexpr const wchar_t* kProxyNames[] = {L"dxgi.dll", L"d3d9.dll", L"version.dll"};
+constexpr wchar_t kVkLayersKey[] = L"Software\\Khronos\\Vulkan\\ImplicitLayers";
+
+enum class Api { Auto, Dxgi, D3D9, OpenGL, Vulkan, Unknown };
 constexpr char kMarker[] = "NITRO_PROXY_MARKER_v1";
 
 enum : int {
     ID_EXE = 100, ID_BROWSE, ID_EXEINFO, ID_ARGS, ID_LSSTATUS, ID_RECHECK, ID_MULT, ID_FLOW,
-    ID_FLOWVAL, ID_PERF, ID_HDR, ID_VSYNC, ID_INSTALL, ID_UNINSTALL, ID_LAUNCH, ID_LOG,
+    ID_FLOWVAL, ID_PERF, ID_HDR, ID_VSYNC, ID_INSTALL, ID_UNINSTALL, ID_LAUNCH, ID_LOG, ID_API,
 };
 
 HINSTANCE g_inst;
@@ -210,6 +215,69 @@ std::wstring FindShippingExe(const std::wstring& dir) {
     return found;
 }
 
+// Imports of the exe plus the DLLs next to it (engines often keep the renderer
+// in a DLL, e.g. UnityPlayer.dll).
+std::vector<std::string> FolderImports(const std::wstring& exe) {
+    std::vector<std::string> all = ReadExe(exe).imports;
+    const std::wstring dir = Parent(exe);
+    WIN32_FIND_DATAW fd;
+    HANDLE h = FindFirstFileW((dir + L"\\*.dll").c_str(), &fd);
+    if (h == INVALID_HANDLE_VALUE) return all;
+    int scanned = 0;
+    do {
+        const ExeInfo dll = ReadExe(dir + L"\\" + fd.cFileName);
+        all.insert(all.end(), dll.imports.begin(), dll.imports.end());
+    } while (++scanned < 80 && FindNextFileW(h, &fd));
+    FindClose(h);
+    return all;
+}
+
+bool Has(const std::vector<std::string>& v, const char* name) {
+    return std::find(v.begin(), v.end(), name) != v.end();
+}
+
+Api DetectApi(const std::wstring& exe, std::wstring& label) {
+    const std::vector<std::string> imp = FolderImports(exe);
+    const std::wstring dir = Parent(exe);
+    const bool dx12 = Has(imp, "d3d12.dll") || DirExists(dir + L"\\D3D12");
+    const bool dx11 = Has(imp, "d3d11.dll");
+    const bool dx10 = Has(imp, "d3d10.dll") || Has(imp, "d3d10_1.dll");
+    if (dx12 || dx11 || dx10 || Has(imp, "dxgi.dll")) {
+        label = dx12 ? L"DirectX 12" : dx11 ? L"DirectX 11" : dx10 ? L"DirectX 10" : L"DirectX (DXGI)";
+        return Api::Dxgi;
+    }
+    if (Has(imp, "d3d9.dll")) return label = L"DirectX 9", Api::D3D9;
+    if (Has(imp, "opengl32.dll")) return label = L"OpenGL", Api::OpenGL;
+    if (Has(imp, "vulkan-1.dll")) return label = L"Vulkan", Api::Vulkan;
+    label = L"not detected (renderer loaded at run time - assuming DirectX 11/12)";
+    return Api::Unknown;
+}
+
+// The API chosen in the drop-down, or the detected one for "Auto".
+Api ChosenApi(const std::wstring& exe) {
+    const LRESULT sel = SendMessageW(Item(ID_API), CB_GETCURSEL, 0, 0);
+    switch (sel) {
+    case 1: return Api::Dxgi;
+    case 2: return Api::D3D9;
+    case 3: return Api::OpenGL;
+    case 4: return Api::Vulkan;
+    default: break;
+    }
+    std::wstring label;
+    const Api a = DetectApi(exe, label);
+    return a == Api::Unknown ? Api::Dxgi : a;
+}
+
+const wchar_t* ApiName(Api a) {
+    switch (a) {
+    case Api::Dxgi: return L"DirectX 10/11/12";
+    case Api::D3D9: return L"DirectX 9";
+    case Api::OpenGL: return L"OpenGL";
+    case Api::Vulkan: return L"Vulkan";
+    default: return L"unknown";
+    }
+}
+
 void AnalyzeGame() {
     const std::wstring exe = Trim(GetText(ID_EXE));
     if (exe.empty()) {
@@ -229,21 +297,10 @@ void AnalyzeGame() {
         SetDlgItemTextW(g_wnd, ID_EXEINFO, L"32-bit game - not supported (64-bit games only).");
         return;
     }
-
-    auto has = [&](const char* name) {
-        return std::find(info.imports.begin(), info.imports.end(), name) != info.imports.end();
-    };
-    std::wstring api;
-    const std::wstring dir = Parent(exe);
-    if (has("d3d12.dll") || DirExists(dir + L"\\D3D12")) api += L"DirectX 12  ";
-    if (has("d3d11.dll")) api += L"DirectX 11  ";
-    if (has("vulkan-1.dll")) api += L"Vulkan (not supported - use DX11/DX12 mode in game)  ";
-    if (has("opengl32.dll")) api += L"OpenGL (not supported)  ";
-    if (has("d3d9.dll")) api += L"DirectX 9 (not supported)  ";
-    if (api.empty()) api = L"loads its renderer dynamically (most DX11/DX12 games do)";
-
-    std::wstring text = L"64-bit game. Renderer: " + api;
-    const std::wstring shipping = FindShippingExe(dir);
+    std::wstring label;
+    DetectApi(exe, label);
+    std::wstring text = L"64-bit game. Renderer: " + label;
+    const std::wstring shipping = FindShippingExe(Parent(exe));
     if (!shipping.empty() && _wcsicmp(shipping.c_str(), exe.c_str()) != 0)
         text += L"\r\nUnreal Engine stub? The real game exe is probably: " + shipping;
     SetDlgItemTextW(g_wnd, ID_EXEINFO, text.c_str());
@@ -306,6 +363,7 @@ Config ConfigFromUi() {
     c.vsyncPacing = IsDlgButtonChecked(g_wnd, ID_VSYNC) == BST_CHECKED;
     const LRESULT hdr = SendMessageW(Item(ID_HDR), CB_GETCURSEL, 0, 0);
     c.hdr = hdr == 1 ? 1 : (hdr == 2 ? 0 : -1);
+    c.api = L"auto";
     return c;
 }
 
@@ -313,6 +371,9 @@ void SaveUi() {
     SaveConfig(IniPath(), ConfigFromUi());
     WritePrivateProfileStringW(L"Launcher", L"GameExe", Trim(GetText(ID_EXE)).c_str(), IniPath().c_str());
     WritePrivateProfileStringW(L"Launcher", L"Arguments", GetText(ID_ARGS).c_str(), IniPath().c_str());
+    WritePrivateProfileStringW(
+        L"Launcher", L"ApiChoice",
+        std::to_wstring(SendMessageW(Item(ID_API), CB_GETCURSEL, 0, 0)).c_str(), IniPath().c_str());
 }
 
 void UpdateFlowLabel() {
@@ -328,6 +389,8 @@ void LoadUi() {
     SetDlgItemTextW(g_wnd, ID_EXE, buf);
     GetPrivateProfileStringW(L"Launcher", L"Arguments", L"", buf, 2048, IniPath().c_str());
     SetDlgItemTextW(g_wnd, ID_ARGS, buf);
+    SendMessageW(Item(ID_API), CB_SETCURSEL,
+                 static_cast<WPARAM>(GetPrivateProfileIntW(L"Launcher", L"ApiChoice", 0, IniPath().c_str())), 0);
     SendMessageW(Item(ID_MULT), CB_SETCURSEL, ClampMultiplier(c.multiplier) - 2, 0);
     SendMessageW(Item(ID_FLOW), TBM_SETPOS, TRUE, static_cast<LPARAM>(c.flowScale * 100.0f + 0.5f));
     CheckDlgButton(g_wnd, ID_PERF, c.performanceMode ? BST_CHECKED : BST_UNCHECKED);
@@ -347,7 +410,7 @@ bool IsOurDll(const std::wstring& path) {
     return std::search(data.begin(), data.end(), kMarker, kMarker + len) != data.end();
 }
 
-bool Preflight(std::wstring& exe) {
+bool Preflight(std::wstring& exe, Api& api) {
     exe = Trim(GetText(ID_EXE));
     if (exe.empty() || !FileExists(exe)) {
         Log(L"Choose the game's .exe first.");
@@ -363,47 +426,149 @@ bool Preflight(std::wstring& exe) {
         Log(L"Lossless.dll is missing or unusable - see the Lossless.dll box above.");
         return false;
     }
-    if (!FileExists(g_dir + L"\\" + kHookDll)) {
-        Log(std::wstring(kHookDll) + L" is missing from the injector folder.");
+    api = ChosenApi(exe);
+    const wchar_t* need = api == Api::Vulkan ? kVkDll : kHookDll;
+    if (!FileExists(g_dir + L"\\" + need)) {
+        Log(std::wstring(need) + L" is missing from the Nitro folder.");
         return false;
+    }
+    if (api == Api::Vulkan && !FileExists(g_dir + L"\\" + kVkManifest)) {
+        Log(std::wstring(kVkManifest) + L" is missing from the Nitro folder.");
+        return false;
+    }
+    return true;
+}
+
+std::wstring Lower(std::wstring s) {
+    std::transform(s.begin(), s.end(), s.begin(), ::towlower);
+    return s;
+}
+
+std::wstring ManifestPath() {
+    wchar_t full[MAX_PATH];
+    GetFullPathNameW((g_dir + L"\\" + kVkManifest).c_str(), MAX_PATH, full, nullptr);
+    return full;
+}
+
+bool RegisterVulkanLayer() {
+    HKEY key = nullptr;
+    if (RegCreateKeyExW(HKEY_CURRENT_USER, kVkLayersKey, 0, nullptr, 0, KEY_SET_VALUE, nullptr, &key, nullptr) !=
+        ERROR_SUCCESS)
+        return false;
+    const DWORD zero = 0;
+    const LONG r = RegSetValueExW(key, ManifestPath().c_str(), 0, REG_DWORD, reinterpret_cast<const BYTE*>(&zero),
+                                  sizeof(zero));
+    RegCloseKey(key);
+    return r == ERROR_SUCCESS;
+}
+
+bool AnyVulkanGames() {
+    wchar_t buf[4096] = {};
+    GetPrivateProfileSectionW(L"VulkanGames", buf, 4096, IniPath().c_str());
+    return buf[0] != 0;
+}
+
+void UnregisterVulkanLayerIfUnused() {
+    if (AnyVulkanGames()) return;
+    RegDeleteKeyValueW(HKEY_CURRENT_USER, kVkLayersKey, ManifestPath().c_str());
+}
+
+// Which system DLL name the hook should stand in for in this game's folder.
+const wchar_t* ProxyFor(Api api, const std::wstring& exe) {
+    if (api == Api::D3D9) return L"d3d9.dll";
+    if (api == Api::OpenGL) {
+        const std::vector<std::string> imp = FolderImports(exe);
+        if (Has(imp, "version.dll")) return L"version.dll";
+        if (Has(imp, "dxgi.dll") || Has(imp, "d3d11.dll")) return L"dxgi.dll";
+        return nullptr;
+    }
+    return L"dxgi.dll";
+}
+
+const wchar_t* HookApiSetting(Api api) {
+    switch (api) {
+    case Api::D3D9: return L"d3d9";
+    case Api::OpenGL: return L"opengl";
+    default: return L"dxgi";
+    }
+}
+
+// Removes every Nitro proxy from the game folder and restores backups.
+bool RemoveProxies(const std::wstring& gameDir, bool& changed) {
+    for (const wchar_t* name : kProxyNames) {
+        const std::wstring dst = gameDir + L"\\" + name;
+        const std::wstring backup = dst + kBackupSuffix;
+        if (FileExists(dst) && IsOurDll(dst)) {
+            if (!DeleteFileW(dst.c_str())) {
+                Log(L"Could not delete " + std::wstring(name) + L": " + ErrorText(GetLastError()) +
+                    L" (is the game still running?)");
+                return false;
+            }
+            changed = true;
+        }
+        if (FileExists(backup) && !FileExists(dst) && MoveFileW(backup.c_str(), dst.c_str())) {
+            Log(L"Restored the game's original " + std::wstring(name) + L".");
+            changed = true;
+        }
     }
     return true;
 }
 
 void Install() {
     std::wstring exe;
-    if (!Preflight(exe)) return;
+    Api api{};
+    if (!Preflight(exe, api)) return;
     SaveUi();
     const std::wstring gameDir = Parent(exe);
-    const std::wstring dst = gameDir + L"\\" + kProxyName;
-    const std::wstring backup = gameDir + L"\\" + kBackupName;
 
-    if (FileExists(dst) && !IsOurDll(dst)) {
+    if (api == Api::Vulkan) {
+        if (!RegisterVulkanLayer()) {
+            Log(L"Could not register the Nitro Vulkan layer in the registry.");
+            return;
+        }
+        WritePrivateProfileStringW(L"VulkanGames", Lower(exe).c_str(), L"1", IniPath().c_str());
+        Log(L"Vulkan game enabled. Nothing was copied into the game folder; Nitro's Vulkan layer "
+            L"switches on for this exe only. Start the game normally.");
+        Log(L"Settings come from the Nitro folder; the log is NitroVk.log there.");
+        return;
+    }
+
+    const wchar_t* proxy = ProxyFor(api, exe);
+    if (!proxy) {
+        Log(L"This OpenGL game doesn't load any DLL Nitro can stand in for. Use 'Launch with injection' instead.");
+        return;
+    }
+    bool changed = false;
+    if (!RemoveProxies(gameDir, changed)) return; // switching APIs: clear old installs first
+
+    const std::wstring dst = gameDir + L"\\" + proxy;
+    const std::wstring backup = dst + kBackupSuffix;
+    if (FileExists(dst)) {
         if (FileExists(backup)) {
-            Log(L"The game folder already has a dxgi.dll and a backup from an earlier install. "
-                L"Sort those out manually first.");
+            Log(L"The game folder already has " + std::wstring(proxy) + L" and a backup of it. Sort those out first.");
             return;
         }
         if (!MoveFileW(dst.c_str(), backup.c_str())) {
-            Log(L"Could not rename the existing dxgi.dll: " + ErrorText(GetLastError()));
+            Log(L"Could not rename the existing " + std::wstring(proxy) + L": " + ErrorText(GetLastError()));
             return;
         }
-        Log(L"The game already had a dxgi.dll (another mod such as ReShade?). "
-            L"Renamed it to " + std::wstring(kBackupName) + L"; it is not loaded while frame gen is installed.");
+        Log(L"The game already had a " + std::wstring(proxy) + L" (another mod?). Renamed it to " + proxy +
+            kBackupSuffix + L"; Remove puts it back.");
     }
-
     if (!CopyFileW((g_dir + L"\\" + kHookDll).c_str(), dst.c_str(), FALSE)) {
         const DWORD e = GetLastError();
         Log(L"Copy failed: " + ErrorText(e));
-        if (e == ERROR_ACCESS_DENIED) Log(L"Try running the injector as administrator.");
+        if (e == ERROR_ACCESS_DENIED) Log(L"Try running Nitro as administrator.");
         return;
     }
     Config c = ConfigFromUi();
+    c.api = HookApiSetting(api);
     if (!SaveConfig(gameDir + L"\\" + kConfigFileName, c)) {
         Log(L"Could not write the settings file into the game folder.");
         return;
     }
-    Log(L"Installed into " + gameDir + L". Start the game normally (Steam, etc.).");
+    Log(std::wstring(L"Installed for ") + ApiName(api) + L" as " + proxy + L" in " + gameDir +
+        L". Start the game normally (Steam, etc.).");
     Log(L"A log is written to Nitro.log in the game folder.");
 }
 
@@ -414,29 +579,18 @@ void Uninstall() {
         return;
     }
     const std::wstring gameDir = Parent(exe);
-    const std::wstring dst = gameDir + L"\\" + kProxyName;
-    const std::wstring backup = gameDir + L"\\" + kBackupName;
-
     bool changed = false;
-    if (FileExists(dst)) {
-        if (!IsOurDll(dst)) {
-            Log(L"The dxgi.dll in the game folder isn't ours - left it alone.");
-        } else if (!DeleteFileW(dst.c_str())) {
-            Log(L"Could not delete dxgi.dll: " + ErrorText(GetLastError()) + L" (is the game still running?)");
-            return;
-        } else {
-            changed = true;
-        }
-    }
-    if (FileExists(backup) && !FileExists(dst)) {
-        if (MoveFileW(backup.c_str(), dst.c_str())) {
-            Log(L"Restored the game's original dxgi.dll.");
-            changed = true;
-        }
+    if (!RemoveProxies(gameDir, changed)) return;
+
+    wchar_t flag[8] = {};
+    if (GetPrivateProfileStringW(L"VulkanGames", Lower(exe).c_str(), L"", flag, 8, IniPath().c_str()) > 0) {
+        WritePrivateProfileStringW(L"VulkanGames", Lower(exe).c_str(), nullptr, IniPath().c_str());
+        UnregisterVulkanLayerIfUnused();
+        changed = true;
     }
     DeleteFileW((gameDir + L"\\" + kConfigFileName).c_str());
     DeleteFileW((gameDir + L"\\Nitro.log").c_str());
-    Log(changed ? L"Removed from " + gameDir : L"Nothing to remove in " + gameDir);
+    Log(changed ? L"Removed Nitro from " + gameDir : L"Nothing to remove for " + gameDir);
 }
 
 HMODULE FindRemoteModule(HANDLE process, const std::wstring& path) {
@@ -463,11 +617,42 @@ bool RunRemote(HANDLE process, LPTHREAD_START_ROUTINE fn, void* arg, DWORD& exit
 
 void Launch() {
     std::wstring exe;
-    if (!Preflight(exe)) return;
-    SaveUi(); // the injected DLL reads Nitro.ini from the injector folder
+    Api api{};
+    if (!Preflight(exe, api)) return;
+    SaveUi(); // the injected DLL / Vulkan layer read Nitro.ini from the Nitro folder
 
-    if (FileExists(Parent(exe) + L"\\" + kProxyName) && IsOurDll(Parent(exe) + L"\\" + kProxyName))
-        Log(L"Note: frame gen is also installed in this game folder; only one copy will be active.");
+    std::wstring cmd = L"\"" + exe + L"\"";
+    const std::wstring args = Trim(GetText(ID_ARGS));
+    if (!args.empty()) cmd += L" " + args;
+    const std::wstring workDir = Parent(exe);
+    STARTUPINFOW si{};
+    si.cb = sizeof(si);
+    PROCESS_INFORMATION pi{};
+
+    if (api == Api::Vulkan) {
+        if (!RegisterVulkanLayer()) {
+            Log(L"Could not register the Nitro Vulkan layer in the registry.");
+            return;
+        }
+        SetEnvironmentVariableW(L"NITRO_VULKAN", L"1"); // inherited by the game only
+        const BOOL ok = CreateProcessW(exe.c_str(), cmd.data(), nullptr, nullptr, FALSE, 0, nullptr,
+                                       workDir.c_str(), &si, &pi);
+        SetEnvironmentVariableW(L"NITRO_VULKAN", nullptr);
+        if (!ok) {
+            Log(L"Could not start the game: " + ErrorText(GetLastError()));
+            return;
+        }
+        CloseHandle(pi.hThread);
+        CloseHandle(pi.hProcess);
+        Log(L"Vulkan game started with Nitro's layer. Log: " + g_dir + L"\\NitroVk.log");
+        return;
+    }
+
+    {
+        Config c = ConfigFromUi();
+        c.api = HookApiSetting(api);
+        SaveConfig(IniPath(), c);
+    }
 
     wchar_t full[MAX_PATH];
     GetFullPathNameW((g_dir + L"\\" + kHookDll).c_str(), MAX_PATH, full, nullptr);
@@ -483,19 +668,11 @@ void Launch() {
         return;
     }
 
-    std::wstring cmd = L"\"" + exe + L"\"";
-    const std::wstring args = Trim(GetText(ID_ARGS));
-    if (!args.empty()) cmd += L" " + args;
-    const std::wstring workDir = Parent(exe);
-
-    STARTUPINFOW si{};
-    si.cb = sizeof(si);
-    PROCESS_INFORMATION pi{};
     if (!CreateProcessW(exe.c_str(), cmd.data(), nullptr, nullptr, FALSE, CREATE_SUSPENDED, nullptr,
                         workDir.c_str(), &si, &pi)) {
         const DWORD e = GetLastError();
         Log(L"Could not start the game: " + ErrorText(e));
-        if (e == ERROR_ELEVATION_REQUIRED) Log(L"The game needs admin rights - run the injector as administrator.");
+        if (e == ERROR_ELEVATION_REQUIRED) Log(L"The game needs admin rights - run Nitro as administrator.");
         return;
     }
 
@@ -520,7 +697,7 @@ void Launch() {
     CloseHandle(pi.hProcess);
 
     if (ok) {
-        Log(L"Game started with frame generation. Log: " + g_dir + L"\\Nitro.log");
+        Log(std::wstring(L"Game started with Nitro (") + ApiName(api) + L"). Log: " + g_dir + L"\\Nitro.log");
         Log(L"If the game restarts itself through Steam, use 'Install into game folder' instead.");
     } else {
         Log(L"Game started, but injection failed (anti-cheat or permissions?). "
@@ -569,7 +746,7 @@ void CreateControls() {
     Add(L"STATIC", L"", 0, 26, 176, 430, 42, ID_LSSTATUS);
     Add(L"BUTTON", L"Re-check", WS_TABSTOP | BS_PUSHBUTTON, 466, 180, 88, 26, ID_RECHECK);
 
-    Add(L"BUTTON", L"Frame generation", BS_GROUPBOX, 14, 232, 552, 170, -1);
+    Add(L"BUTTON", L"Frame generation", BS_GROUPBOX, 14, 232, 552, 202, -1);
     Add(L"STATIC", L"Multiplier:", 0, 26, 258, 90, 20, -1);
     HWND mult = Add(L"COMBOBOX", L"", WS_TABSTOP | CBS_DROPDOWNLIST | WS_VSCROLL, 116, 254, 90, 200, ID_MULT);
     for (const wchar_t* s : {L"2x", L"3x", L"4x"}) SendMessageW(mult, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(s));
@@ -585,15 +762,20 @@ void CreateControls() {
     HWND hdr = Add(L"COMBOBOX", L"", WS_TABSTOP | CBS_DROPDOWNLIST | WS_VSCROLL, 394, 290, 110, 200, ID_HDR);
     for (const wchar_t* s : {L"Auto", L"On", L"Off"}) SendMessageW(hdr, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(s));
     Add(L"BUTTON", L"Pace generated frames with VSync (recommended)", WS_TABSTOP | BS_AUTOCHECKBOX, 26, 318, 500, 22, ID_VSYNC);
+    Add(L"STATIC", L"Graphics API:", 0, 26, 352, 90, 20, -1);
+    HWND api = Add(L"COMBOBOX", L"", WS_TABSTOP | CBS_DROPDOWNLIST | WS_VSCROLL, 116, 348, 220, 200, ID_API);
+    for (const wchar_t* s : {L"Auto-detect", L"DirectX 10 / 11 / 12", L"DirectX 9", L"OpenGL", L"Vulkan"})
+        SendMessageW(api, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(s));
+    SendMessageW(api, CB_SETCURSEL, 0, 0);
     Add(L"STATIC",
         L"In game: End = frame gen on/off, Home = cycle 2x / 3x / 4x.\r\n"
         L"Cap the game's FPS to refresh rate ÷ multiplier (e.g. 60 FPS on a 240 Hz screen for 4x).",
-        0, 26, 346, 530, 48, -1);
+        0, 26, 380, 530, 48, -1);
 
-    Add(L"BUTTON", L"Install into game folder", WS_TABSTOP | BS_PUSHBUTTON, 14, 414, 180, 32, ID_INSTALL);
-    Add(L"BUTTON", L"Remove from game folder", WS_TABSTOP | BS_PUSHBUTTON, 204, 414, 180, 32, ID_UNINSTALL);
-    Add(L"BUTTON", L"Launch with injection", WS_TABSTOP | BS_PUSHBUTTON, 394, 414, 172, 32, ID_LAUNCH);
-    Add(L"EDIT", L"", WS_VSCROLL | ES_MULTILINE | ES_READONLY | ES_AUTOVSCROLL, 14, 458, 552, 150, ID_LOG,
+    Add(L"BUTTON", L"Install into game folder", WS_TABSTOP | BS_PUSHBUTTON, 14, 446, 180, 32, ID_INSTALL);
+    Add(L"BUTTON", L"Remove from game folder", WS_TABSTOP | BS_PUSHBUTTON, 204, 446, 180, 32, ID_UNINSTALL);
+    Add(L"BUTTON", L"Launch with injection", WS_TABSTOP | BS_PUSHBUTTON, 394, 446, 172, 32, ID_LAUNCH);
+    Add(L"EDIT", L"", WS_VSCROLL | ES_MULTILINE | ES_READONLY | ES_AUTOVSCROLL, 14, 490, 552, 150, ID_LOG,
         WS_EX_CLIENTEDGE);
 }
 
@@ -605,7 +787,8 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         LoadUi();
         CheckLossless();
         AnalyzeGame();
-        Log(L"Ready. Single-player games only - never use this with online/anti-cheat games.");
+        Log(L"Ready. Supports DirectX 9/10/11/12, OpenGL and Vulkan. Single-player games only - "
+            L"never use this with online/anti-cheat games.");
         return 0;
     case WM_COMMAND:
         switch (LOWORD(wp)) {
@@ -671,7 +854,7 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE, LPWSTR, int show) {
     RegisterClassExW(&wc);
 
     const DWORD style = WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX;
-    RECT rc{0, 0, S(580), S(622)};
+    RECT rc{0, 0, S(580), S(654)};
     AdjustWindowRect(&rc, style, FALSE);
     HWND wnd = CreateWindowExW(0, wc.lpszClassName, L"Nitro - frame generation for any game",
                                style, CW_USEDEFAULT, CW_USEDEFAULT, rc.right - rc.left, rc.bottom - rc.top,

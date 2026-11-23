@@ -39,6 +39,8 @@ DXGI_FORMAT TypelessFormat(DXGI_FORMAT f) {
     }
 }
 
+} // namespace
+
 // Raw (non-sRGB) view so the shaders see the same encoded values a screen
 // capture would.
 DXGI_FORMAT ViewFormat(DXGI_FORMAT f) {
@@ -52,8 +54,6 @@ DXGI_FORMAT ViewFormat(DXGI_FORMAT f) {
     default: return f;
     }
 }
-
-} // namespace
 
 bool IsSupportedBackbufferFormat(DXGI_FORMAT f) {
     switch (f) {

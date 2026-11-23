@@ -26,4 +26,14 @@ OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
 ```
 
+## MinHook
+
+NitroHook.dll statically links MinHook (https://github.com/TsudaKageyu/minhook), BSD 2-Clause licence, Copyright (C) 2009-2017 Tsuda Kageyu. Licence text: https://github.com/TsudaKageyu/minhook/blob/master/LICENSE.txt
+
+## Vulkan-Headers
+
+NitroVk.dll is built with the Khronos Vulkan headers (https://github.com/KhronosGroup/Vulkan-Headers), Apache License 2.0.
+
+## Lossless Scaling
+
 Lossless Scaling and its shaders are the property of their developer. This project ships none of them; it reads them from the user's own Lossless.dll at runtime.

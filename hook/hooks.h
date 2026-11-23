@@ -2,28 +2,17 @@
 
 #include <windows.h>
 
-#include <atomic>
-
-#include "../common/config.h"
-#include "../common/shader_extract.h"
-
 namespace lsfgi {
 
-struct Globals {
-    HMODULE self = nullptr;
-    Config cfg;
-    ShaderBlobs shaders;
-    std::atomic<bool> fgEnabled{true};
-    std::atomic<int> multiplier{2};
-};
-
-Globals& G();
-
-// Thread entry: loads config + shaders and installs the swap chain hooks.
-// Safe to call more than once (only the first call does anything).
+// Thread entry: loads settings + shaders and installs the hooks for the
+// configured graphics API. Only the first call does anything.
 DWORD WINAPI InitHooksThread(LPVOID);
 
-// Address of an export in the real System32 dxgi.dll (set up in DllMain).
-void* RealDxgiProc(const char* name);
+void InstallDxgiHooks();  // DX10 / DX11 / DX12
+void InstallD3D9Hooks();  // DX9 / DX9Ex
+void InstallGLHooks();    // OpenGL
+
+// Creates a hidden 64x64 window for throwaway devices / swap chains.
+HWND CreateDummyWindow();
 
 } // namespace lsfgi

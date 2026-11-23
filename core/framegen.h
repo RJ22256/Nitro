@@ -44,6 +44,8 @@ bool IsSupportedBackbufferFormat(DXGI_FORMAT f);
 bool IsSrgbFormat(DXGI_FORMAT f);
 DXGI_FORMAT OutputFormatFor(DXGI_FORMAT backbuffer);
 bool IsHdrFormat(DXGI_FORMAT f);
+// Typed, non-sRGB view of a back buffer format (what Nitro's textures use).
+DXGI_FORMAT ViewFormat(DXGI_FORMAT f);
 
 class FrameGen {
 public:

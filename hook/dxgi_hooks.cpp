@@ -1,8 +1,10 @@
-// Swap chain hooks: every time the game presents a real frame, run LSFG on it,
-// present the generated in-between frames, then present the real frame.
+// DXGI swap chain hooks (DX10 / DX11 / DX12): every time the game presents a
+// real frame, run LSFG on it, present the generated in-between frames, then
+// present the real frame.
 
 #include "hooks.h"
 
+#include <d3d10.h>
 #include <d3d11_1.h>
 #include <d3d11on12.h>
 #include <d3d12.h>
@@ -14,18 +16,15 @@
 #include <mutex>
 #include <unordered_map>
 
-#include "blit.h"
-#include "framegen.h"
-#include "log.h"
+#include "../core/blit.h"
+#include "../core/bridge.h"
+#include "../core/framegen.h"
+#include "../core/log.h"
+#include "../core/runtime.h"
 
 namespace lsfgi {
 
 using Microsoft::WRL::ComPtr;
-
-Globals& G() {
-    static Globals g;
-    return g;
-}
 
 namespace {
 
@@ -67,8 +66,6 @@ const VtHooks* FindVt(void* obj) {
     return &g_vt[0];
 }
 
-thread_local bool t_inHook = false;
-
 // ---------------------------------------------------------------------------
 
 struct PresentCall {
@@ -103,13 +100,26 @@ public:
     void ReleaseBuffers();
 
 private:
+    HRESULT PresentD3D10(const PresentCall& call, const DXGI_SWAP_CHAIN_DESC& desc);
+    bool EnsureBridge10(UINT w, UINT h, DXGI_FORMAT fmt);
+    void Wait10();
+
     bool EnsureFrameGen(const DXGI_SWAP_CHAIN_DESC& desc);
     bool BeginFrame(IDXGISwapChain* sc, ComPtr<ID3D11Texture2D>& bb);
     void EndFrame();
     void WriteGenerated(int i, ID3D11Texture2D* bb);
 
     bool d3d12_ = false;
+    bool d3d10_ = false;
     IUnknown* deviceKey_ = nullptr;
+
+    // D3D10 games: frame gen runs on Nitro's own D3D11 device (shared textures)
+    ComPtr<ID3D10Device> dev10_;
+    ComPtr<ID3D10Query> query10_;
+    LUID luid_{};
+    std::unique_ptr<Bridge> bridge_;
+    ComPtr<ID3D10Texture2D> in10_;
+    std::vector<ComPtr<ID3D10Texture2D>> out10_;
     ComPtr<ID3D11Device> dev_;
     ComPtr<ID3D11DeviceContext> ctx_;
 
@@ -161,6 +171,23 @@ bool SwapState::Init(IDXGISwapChain* sc) {
             return false;
         }
         Log("Attached to a D3D11 swap chain");
+    } else if (ComPtr<ID3D10Device> d10; SUCCEEDED(sc->GetDevice(IID_PPV_ARGS(&d10)))) {
+        dev10_ = d10;
+        deviceKey_ = d10.Get();
+        d3d10_ = true;
+        ComPtr<IDXGIDevice> dxgiDev;
+        ComPtr<IDXGIAdapter> adapter;
+        DXGI_ADAPTER_DESC ad{};
+        if (SUCCEEDED(d10.As(&dxgiDev)) && SUCCEEDED(dxgiDev->GetAdapter(&adapter)) &&
+            SUCCEEDED(adapter->GetDesc(&ad)))
+            luid_ = ad.AdapterLuid;
+        D3D10_QUERY_DESC qd{D3D10_QUERY_EVENT, 0};
+        if (FAILED(d10->CreateQuery(&qd, &query10_))) {
+            Log("D3D10 query creation failed - skipping");
+            return false;
+        }
+        Log("Attached to a D3D10 swap chain (frame gen on a separate D3D11 device)");
+        return true;
     } else {
         if (FAILED(sc->GetDevice(IID_PPV_ARGS(&queue_)))) {
             Log("Swap chain is neither D3D11 nor D3D12 - skipping");
@@ -199,6 +226,10 @@ bool SwapState::Init(IDXGISwapChain* sc) {
 
 bool SwapState::SameDevice(IDXGISwapChain* sc) const {
     if (failed) return true;
+    if (d3d10_) {
+        ComPtr<ID3D10Device> d;
+        return SUCCEEDED(sc->GetDevice(IID_PPV_ARGS(&d))) && d.Get() == deviceKey_;
+    }
     if (d3d12_) {
         ComPtr<ID3D12CommandQueue> q;
         return SUCCEEDED(sc->GetDevice(IID_PPV_ARGS(&q))) && q.Get() == deviceKey_;
@@ -302,6 +333,7 @@ void SwapState::WriteGenerated(int i, ID3D11Texture2D* bb) {
 }
 
 void SwapState::ReleaseBuffers() {
+    if (bridge_) bridge_->Reset();
     if (d3d12_ && ctx_) {
         wrapped_.clear();
         ctx_->ClearState();
@@ -310,10 +342,83 @@ void SwapState::ReleaseBuffers() {
     if (fg_) fg_->Reset();
 }
 
+void SwapState::Wait10() {
+    query10_->End();
+    dev10_->Flush();
+    BOOL done = FALSE;
+    while (query10_->GetData(&done, sizeof(done), 0) == S_FALSE) SwitchToThread();
+}
+
+bool SwapState::EnsureBridge10(UINT w, UINT h, DXGI_FORMAT fmt) {
+    const DXGI_FORMAT view = ViewFormat(fmt);
+    if (bridge_ && bridge_->Matches(w, h, view, G().multiplier.load())) return true;
+    in10_.Reset();
+    out10_.clear();
+    bridge_ = std::make_unique<Bridge>();
+    BridgeParams p;
+    p.adapter = &luid_;
+    p.width = w;
+    p.height = h;
+    p.format = view;
+    p.share = ShareMode::Legacy;
+    std::string err;
+    if (!bridge_->Init(p, err)) {
+        Log("D3D10 frame generation setup failed: %s", err.c_str());
+        bridge_.reset();
+        return false;
+    }
+    if (FAILED(dev10_->OpenSharedResource(bridge_->InputHandle(), IID_PPV_ARGS(&in10_)))) {
+        Log("D3D10 could not open the shared input texture");
+        bridge_.reset();
+        return false;
+    }
+    out10_.resize(static_cast<size_t>(bridge_->MaxOutputs()));
+    for (int k = 0; k < bridge_->MaxOutputs(); ++k) {
+        if (FAILED(dev10_->OpenSharedResource(bridge_->OutputHandle(k), IID_PPV_ARGS(&out10_[k])))) {
+            Log("D3D10 could not open a shared output texture");
+            bridge_.reset();
+            return false;
+        }
+    }
+    return true;
+}
+
+HRESULT SwapState::PresentD3D10(const PresentCall& call, const DXGI_SWAP_CHAIN_DESC& desc) {
+    if (!EnsureBridge10(desc.BufferDesc.Width, desc.BufferDesc.Height, desc.BufferDesc.Format)) {
+        failed = true;
+        return call.Real(call.sync, call.flags);
+    }
+    UINT sync = call.sync, flags = call.flags;
+    if (G().cfg.vsyncPacing) {
+        if (sync == 0) sync = 1;
+        flags &= ~static_cast<UINT>(DXGI_PRESENT_ALLOW_TEARING);
+    }
+    const UINT genFlags = flags & ~static_cast<UINT>(DXGI_PRESENT_DO_NOT_WAIT | DXGI_PRESENT_RESTART |
+                                                     DXGI_PRESENT_DO_NOT_SEQUENCE);
+
+    ComPtr<ID3D10Texture2D> bb;
+    if (FAILED(call.sc->GetBuffer(0, IID_PPV_ARGS(&bb)))) return call.Real(call.sync, call.flags);
+    dev10_->CopyResource(in10_.Get(), bb.Get());
+    Wait10();
+
+    const int n = bridge_->Run();
+    for (int k = 0; k < n; ++k) {
+        dev10_->CopyResource(bb.Get(), out10_[k].Get());
+        bb.Reset();
+        const HRESULT hr = call.Generated(sync, genFlags);
+        if (FAILED(hr)) return hr;
+        if (FAILED(call.sc->GetBuffer(0, IID_PPV_ARGS(&bb)))) return call.Real(sync, flags);
+    }
+    if (n > 0) dev10_->CopyResource(bb.Get(), in10_.Get());
+    bb.Reset();
+    return call.Real(sync, flags);
+}
+
 HRESULT SwapState::Present(const PresentCall& call) {
     auto& g = G();
     if (failed || !g.fgEnabled.load()) {
         if (fg_) fg_->Reset();
+        if (bridge_) bridge_->Reset();
         return call.Real(call.sync, call.flags);
     }
 
@@ -327,6 +432,7 @@ HRESULT SwapState::Present(const PresentCall& call) {
         }
         return call.Real(call.sync, call.flags);
     }
+    if (d3d10_) return PresentD3D10(call, desc);
     if (!EnsureFrameGen(desc)) {
         failed = true;
         return call.Real(call.sync, call.flags);
@@ -364,30 +470,9 @@ HRESULT SwapState::Present(const PresentCall& call) {
 std::mutex g_stateMutex;
 std::unordered_map<IDXGISwapChain*, std::unique_ptr<SwapState>> g_states;
 
-void PollHotkeys() {
-    static bool prevToggle = false, prevCycle = false;
-    auto& g = G();
-    const bool toggle = g.cfg.toggleKey && (GetAsyncKeyState(g.cfg.toggleKey) & 0x8000);
-    if (toggle && !prevToggle) {
-        const bool on = !g.fgEnabled.load();
-        g.fgEnabled = on;
-        Log("Frame generation %s", on ? "ON" : "OFF");
-    }
-    prevToggle = toggle;
-
-    const bool cycle = g.cfg.cycleKey && (GetAsyncKeyState(g.cfg.cycleKey) & 0x8000);
-    if (cycle && !prevCycle) {
-        int m = g.multiplier.load() + 1;
-        if (m > 4) m = 2;
-        g.multiplier = m;
-        Log("Multiplier set to %dx", m);
-    }
-    prevCycle = cycle;
-}
-
 HRESULT HandlePresent(const PresentCall& call) {
-    if (t_inHook || (call.flags & DXGI_PRESENT_TEST)) return call.Real(call.sync, call.flags);
-    t_inHook = true;
+    if (InHook() || (call.flags & DXGI_PRESENT_TEST)) return call.Real(call.sync, call.flags);
+    InHook() = true;
     PollHotkeys();
 
     SwapState* state = nullptr;
@@ -402,7 +487,7 @@ HRESULT HandlePresent(const PresentCall& call) {
         state = slot.get();
     }
     const HRESULT hr = state->Present(call);
-    t_inHook = false;
+    InHook() = false;
     return hr;
 }
 
@@ -473,20 +558,6 @@ void HookSwapChain(IDXGISwapChain* sc) {
         has1 ? "yes" : "no", has3 ? "yes" : "no");
 }
 
-HWND CreateDummyWindow() {
-    static ATOM cls = 0;
-    if (!cls) {
-        WNDCLASSEXW wc{};
-        wc.cbSize = sizeof(wc);
-        wc.lpfnWndProc = DefWindowProcW;
-        wc.hInstance = G().self;
-        wc.lpszClassName = L"NitroDummy";
-        cls = RegisterClassExW(&wc);
-    }
-    return CreateWindowExW(0, L"NitroDummy", L"", WS_OVERLAPPEDWINDOW, 0, 0, 64, 64, nullptr,
-                           nullptr, G().self, nullptr);
-}
-
 void HookFromDevice(IDXGIFactory2* factory, IUnknown* deviceOrQueue, bool legacyToo) {
     if (HWND wnd = CreateDummyWindow()) {
         DXGI_SWAP_CHAIN_DESC1 d{};
@@ -522,9 +593,27 @@ void HookFromDevice(IDXGIFactory2* factory, IUnknown* deviceOrQueue, bool legacy
     }
 }
 
-void InstallSwapChainHooks() {
+} // namespace
+
+HWND CreateDummyWindow() {
+    static ATOM cls = 0;
+    if (!cls) {
+        WNDCLASSEXW wc{};
+        wc.cbSize = sizeof(wc);
+        wc.lpfnWndProc = DefWindowProcW;
+        wc.hInstance = G().self;
+        wc.lpszClassName = L"NitroDummy";
+        cls = RegisterClassExW(&wc);
+    }
+    return CreateWindowExW(0, L"NitroDummy", L"", WS_OVERLAPPEDWINDOW, 0, 0, 64, 64, nullptr,
+                           nullptr, G().self, nullptr);
+}
+
+void InstallDxgiHooks() {
     using CreateFactory1Fn = HRESULT(WINAPI*)(REFIID, void**);
-    auto createFactory = reinterpret_cast<CreateFactory1Fn>(RealDxgiProc("CreateDXGIFactory1"));
+    HMODULE dxgi = SystemModule(L"dxgi.dll");
+    auto createFactory =
+        dxgi ? reinterpret_cast<CreateFactory1Fn>(GetProcAddress(dxgi, "CreateDXGIFactory1")) : nullptr;
     if (!createFactory) {
         Log("CreateDXGIFactory1 not found in system dxgi.dll");
         return;
@@ -535,7 +624,7 @@ void InstallSwapChainHooks() {
         return;
     }
 
-    HMODULE d3d11 = LoadLibraryW(L"d3d11.dll");
+    HMODULE d3d11 = SystemModule(L"d3d11.dll");
     auto createDevice =
         d3d11 ? reinterpret_cast<PFN_D3D11_CREATE_DEVICE>(GetProcAddress(d3d11, "D3D11CreateDevice"))
               : nullptr;
@@ -550,7 +639,7 @@ void InstallSwapChainHooks() {
     }
 
     if (G().cfg.probeD3D12) {
-        if (HMODULE d3d12 = LoadLibraryW(L"d3d12.dll")) {
+        if (HMODULE d3d12 = SystemModule(L"d3d12.dll")) {
             auto create12 =
                 reinterpret_cast<PFN_D3D12_CREATE_DEVICE>(GetProcAddress(d3d12, "D3D12CreateDevice"));
             ComPtr<ID3D12Device> d12;
@@ -565,52 +654,6 @@ void InstallSwapChainHooks() {
     }
 
     Log("%d swap chain vtable(s) hooked", g_vtCount.load());
-}
-
-void DoInit() {
-    auto& g = G();
-    const std::wstring dir = ModuleDirectory(g.self);
-    LogInit(dir + L"\\Nitro.log");
-
-    wchar_t exe[MAX_PATH] = {};
-    GetModuleFileNameW(nullptr, exe, MAX_PATH);
-    Log("Nitro loaded into %s", Narrow(exe).c_str());
-
-    // Only one copy may hook per process (e.g. installed AND launch-injected).
-    wchar_t mutexName[64];
-    swprintf(mutexName, 64, L"Local\\Nitro_%lu", GetCurrentProcessId());
-    HANDLE mutex = CreateMutexW(nullptr, FALSE, mutexName);
-    if (mutex && GetLastError() == ERROR_ALREADY_EXISTS) {
-        Log("Another Nitro copy is already active in this process - this one stays idle");
-        return;
-    }
-
-    LoadConfig(dir + L"\\" + kConfigFileName, g.cfg);
-    if (g.cfg.losslessDll.empty()) g.cfg.losslessDll = dir + L"\\Lossless.dll";
-    g.multiplier = g.cfg.multiplier;
-    g.fgEnabled = g.cfg.enabled;
-
-    int offset = -1;
-    std::wstring err;
-    if (!LoadLsfgShaders(g.cfg.losslessDll, g.cfg.shaderOffset, g.shaders, offset, err)) {
-        Log("Shader load failed: %s", Narrow(err).c_str());
-        Log("Frame generation disabled - the game will run normally");
-        return;
-    }
-    Log("Loaded %zu shaders from %s (resource offset %d)", g.shaders.size(),
-        Narrow(g.cfg.losslessDll).c_str(), offset);
-    if (g.cfg.performanceMode && g.shaders.find("p_alpha[0]") == g.shaders.end())
-        Log("Performance-mode shaders not found; using quality mode");
-
-    InstallSwapChainHooks();
-}
-
-} // namespace
-
-DWORD WINAPI InitHooksThread(LPVOID) {
-    static std::once_flag once;
-    std::call_once(once, DoInit);
-    return 0;
 }
 
 } // namespace lsfgi

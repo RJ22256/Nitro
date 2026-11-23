@@ -53,6 +53,7 @@ void LoadConfig(const std::wstring& ini, Config& cfg) {
     cfg.cycleKey = ReadInt(ini, L"CycleKey", cfg.cycleKey);
     cfg.shaderOffset = ReadInt(ini, L"ShaderOffset", cfg.shaderOffset);
     cfg.probeD3D12 = ReadInt(ini, L"ProbeD3D12", cfg.probeD3D12) != 0;
+    cfg.api = ReadString(ini, L"Api", cfg.api.c_str());
 }
 
 bool SaveConfig(const std::wstring& ini, const Config& cfg) {
@@ -74,6 +75,7 @@ bool SaveConfig(const std::wstring& ini, const Config& cfg) {
     ok &= Write(ini, L"CycleKey", key2);
     ok &= Write(ini, L"ShaderOffset", std::to_wstring(cfg.shaderOffset));
     ok &= Write(ini, L"ProbeD3D12", cfg.probeD3D12 ? L"1" : L"0");
+    ok &= Write(ini, L"Api", cfg.api);
     return ok;
 }
 
