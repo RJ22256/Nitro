@@ -897,12 +897,12 @@ const GroupHooks kGroups[kMaxVtables] = {MakeGroup<0>(), MakeGroup<1>(), MakeGro
 
 // Every function we've detoured, so a second group that shares an
 // implementation (e.g. GetBuffer) reuses the first group's trampoline.
-struct Detour {
+struct DetourEntry {
     void* target;
     void* trampoline;
 };
 std::mutex g_detourMutex;
-Detour g_detours[64];
+DetourEntry g_detours[64];
 int g_detourCount = 0;
 
 // Detours target with hook (once) and stores the pointer that calls the
