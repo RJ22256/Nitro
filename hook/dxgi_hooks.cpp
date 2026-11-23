@@ -4,7 +4,7 @@
 
 #include "hooks.h"
 
-#include <d3d10.h>
+#include <d3d10_1.h> // must precede anything that pulls in d3d10.h
 #include <d3d11_1.h>
 #include <d3d11on12.h>
 #include <d3d12.h>
