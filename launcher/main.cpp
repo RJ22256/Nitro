@@ -1015,17 +1015,10 @@ void ResizeSwapChain() {
     g_resizeW = g_resizeH = 0;
 }
 
-// Text with the logo's cyan -> pink gradient.
+// Large light-weight heading (PlayStation-style).
 void GradientText(ImFont* font, const char* text) {
     ImGui::PushFont(font);
-    const ImVec2 p = ImGui::GetCursorScreenPos();
-    const ImVec2 size = ImGui::CalcTextSize(text);
-    ImDrawList* dl = ImGui::GetWindowDrawList();
-    const int v0 = dl->VtxBuffer.Size;
-    dl->AddText(p, IM_COL32_WHITE, text);
-    ImGui::ShadeVertsLinearColorGradientKeepAlpha(dl, v0, dl->VtxBuffer.Size, p, ImVec2(p.x + size.x, p.y),
-                                                  nitro_ui::kCyan, nitro_ui::kPink);
-    ImGui::Dummy(size);
+    ImGui::TextUnformatted(text);
     ImGui::PopFont();
 }
 
@@ -1046,7 +1039,7 @@ void KeyRow(const char* key, const char* what) {
     ImGui::SetCursorPosX(ImGui::GetCursorPosX());
     const float keyCol = 74 * g_scale;
     const float x0 = ImGui::GetCursorPosX();
-    nitro_ui::Chip(key, ImVec4(0.0f, 0.898f, 1.0f, 1.0f));
+    nitro_ui::Chip(key, ImVec4(0.361f, 0.667f, 1.0f, 1.0f));
     ImGui::SameLine(x0 + keyCol);
     ImGui::SetCursorPosY(y + 3.0f); // line up with the chip's text
     ImGui::TextUnformatted(what);
@@ -1069,7 +1062,7 @@ void StepDots(int step) {
     ImDrawList* dl = ImGui::GetWindowDrawList();
     for (int i = 0; i < 3; ++i)
         dl->AddCircleFilled(ImVec2(p.x + gap * static_cast<float>(i), p.y + r), i == step ? r * 1.25f : r,
-                            i == step ? nitro_ui::kCyan : IM_COL32(52, 60, 110, 255));
+                            i == step ? IM_COL32_WHITE : IM_COL32(255, 255, 255, 60));
     ImGui::Dummy(ImVec2(0, r * 2 + 4 * s));
 }
 
@@ -1209,7 +1202,7 @@ void DrawBadge(ImDrawList* dl, ImVec2 pos, const char* text, ImVec4 color) {
     ImGui::PushFont(g_fonts.caption);
     const ImVec2 ts = ImGui::CalcTextSize(text);
     const ImVec2 q(pos.x + ts.x + 14 * s, pos.y + ts.y + 6 * s);
-    dl->AddRectFilled(pos, q, IM_COL32(10, 12, 30, 225), 6 * s);
+    dl->AddRectFilled(pos, q, IM_COL32(6, 16, 42, 225), 6 * s);
     dl->AddRect(pos, q, ImGui::ColorConvertFloat4ToU32(ImVec4(color.x, color.y, color.z, 0.8f)), 6 * s);
     dl->AddText(ImVec2(pos.x + 7 * s, pos.y + 3 * s), ImGui::ColorConvertFloat4ToU32(color), text);
     ImGui::PopFont();
@@ -1247,7 +1240,7 @@ void DrawGameTile(nitro_lib::Game& g, float w, bool& refreshStatus) {
                     IM_COL32(255, 255, 255, g.antiCheat ? 110 : 235), mono.c_str());
         ImGui::PopFont();
     }
-    if (hovered) dl->AddRect(p, q, nitro_ui::kCyan, r, 0, 2.5f * s);
+    if (hovered) nitro_ui::DrawFocus(dl, p, q, r);
 
     // Badges
     if (g.antiCheat)
@@ -1466,8 +1459,8 @@ void DrawSetup() {
                 wiz.selected = static_cast<int>(i);
             ImDrawList* dl = ImGui::GetWindowDrawList();
             const ImVec2 q(p.x + ImGui::GetItemRectSize().x, p.y + rowH);
-            dl->AddRectFilled(p, q, sel ? IM_COL32(122, 92, 255, 60) : (ImGui::IsItemHovered() ? IM_COL32(42, 49, 94, 255) : IM_COL32(29, 34, 66, 255)), 10 * s);
-            if (sel) dl->AddRect(p, q, nitro_ui::kViolet, 10 * s, 0, 1.5f * s);
+            dl->AddRectFilled(p, q, sel ? IM_COL32(0, 112, 209, 90) : (ImGui::IsItemHovered() ? IM_COL32(255, 255, 255, 30) : IM_COL32(255, 255, 255, 16)), 12 * s);
+            if (sel) nitro_ui::DrawFocus(dl, p, q, 12 * s);
             ImGui::SetCursorScreenPos(ImVec2(p.x + 14 * s, p.y + 8 * s));
             ImGui::BeginGroup();
             {
@@ -1572,6 +1565,11 @@ void DrawFooter() {
 
 void DrawUi() {
     const float s = g_scale;
+    {
+        const ImGuiViewport* v = ImGui::GetMainViewport();
+        nitro_ui::DrawBackdrop(ImGui::GetBackgroundDrawList(), v->Pos,
+                               ImVec2(v->Pos.x + v->Size.x, v->Pos.y + v->Size.y));
+    }
     if (wiz.active) {
         DrawSetup();
         return;
@@ -1589,42 +1587,43 @@ void DrawUi() {
     ImGui::PopStyleVar(3);
     bool changed = false;
 
-    // ---- Header
+    // ---- Header: logo + name on the left, Game / Library tabs on the right
     {
-        const float logo = 96 * s;
+        const float logo = 72 * s;
         nitro_ui::DrawLogo(ImGui::GetWindowDrawList(), ImGui::GetCursorScreenPos(), logo);
         ImGui::Dummy(ImVec2(logo, logo));
         ImGui::SameLine(0, 18 * s);
         ImGui::BeginGroup();
-        GradientText(g_fonts.title, "NITRO");
-        ImGui::TextColored(nitro_ui::kMuted, "Frame generation for any game \xC2\xB7 powered by your Lossless Scaling");
-        ImGui::PushFont(g_fonts.caption);
-        const char* chips[] = {"DirectX 9", "DirectX 10", "DirectX 11", "DirectX 12", "OpenGL", "Vulkan"};
-        for (int i = 0; i < 6; ++i) {
-            if (i) ImGui::SameLine(0, 6 * s);
-            nitro_ui::Chip(chips[i], ImVec4(0.478f, 0.361f, 1.0f, 1.0f));
-        }
+        ImGui::PushFont(g_fonts.title);
+        const float titleH = ImGui::GetTextLineHeight();
         ImGui::PopFont();
+        const float subH = ImGui::GetTextLineHeight();
+        ImGui::Dummy(ImVec2(0, (std::max)(0.0f, (logo - titleH - subH) * 0.5f - 6 * s)));
+        GradientText(g_fonts.title, "Nitro");
+        ImGui::SetCursorPosY(ImGui::GetCursorPosY() - 8 * s);
+        ImGui::TextColored(nitro_ui::kMuted, "Frame generation for your games \xC2\xB7 powered by Lossless Scaling");
         ImGui::EndGroup();
 
-        // Game / Library switch
         ImGui::SameLine();
-        const float pw = 104 * s, ph = ImGui::GetFrameHeight() * 1.1f;
-        nitro_ui::SameLineRight(pw * 2 + 8 * s);
+        ImGui::PushFont(g_fonts.tab);
+        const float gapTabs = 30 * s;
+        const float tw = ImGui::CalcTextSize("Game").x + ImGui::CalcTextSize("Library").x + gapTabs;
+        nitro_ui::SameLineRight(tw);
         ImGui::BeginGroup();
-        ImGui::Dummy(ImVec2(0, (logo - ph) * 0.5f));
-        if (nitro_ui::Pill("Game", ui.view == 0, ImVec2(pw, ph)) && ui.view != 0) {
+        ImGui::Dummy(ImVec2(0, (logo - ImGui::GetTextLineHeight()) * 0.5f - ImGui::GetStyle().FramePadding.y));
+        if (nitro_ui::NavTab("Game", ui.view == 0) && ui.view != 0) {
             ui.view = 0;
             changed = true;
         }
-        ImGui::SameLine(0, 8 * s);
-        if (nitro_ui::Pill("Library", ui.view == 1, ImVec2(pw, ph)) && ui.view != 1) {
+        ImGui::SameLine(0, gapTabs);
+        if (nitro_ui::NavTab("Library", ui.view == 1) && ui.view != 1) {
             ui.view = 1;
             changed = true;
         }
         ImGui::EndGroup();
+        ImGui::PopFont();
     }
-    ImGui::Spacing();
+    ImGui::Dummy(ImVec2(0, 6 * s));
 
     const float avail = ImGui::GetContentRegionAvail().x;
     const float gap = ImGui::GetStyle().ItemSpacing.x * 1.5f;
@@ -1658,7 +1657,7 @@ void DrawUi() {
         nitro_ui::Chip(ui.exeInfo.c_str(), good ? nitro_ui::kGood : nitro_ui::kMuted);
         if (!ui.detected.empty()) {
             ImGui::SameLine();
-            nitro_ui::Chip(("Renderer: " + ui.detected).c_str(), ImVec4(0.0f, 0.898f, 1.0f, 1.0f));
+            nitro_ui::Chip(("Renderer: " + ui.detected).c_str(), ImVec4(0.361f, 0.667f, 1.0f, 1.0f));
         }
         if (!ui.exeHint.empty()) {
             ImGui::TextColored(nitro_ui::kWarn, "Unreal Engine launcher stub? The real game is probably:");
@@ -1928,6 +1927,9 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE, LPWSTR, int show) {
     io.ConfigFlags |= ImGuiConfigFlags_NavEnableKeyboard;
     g_fonts = nitro_ui::LoadFonts(17.0f * g_scale);
     nitro_ui::ApplyStyle(g_scale);
+    // The window sits on Nitro's backdrop (drawn behind it every frame).
+    ImGui::GetStyle().Colors[ImGuiCol_WindowBg] = ImVec4(0, 0, 0, 0);
+    ImGui::GetStyle().Colors[ImGuiCol_Border] = ImVec4(1, 1, 1, 0.10f);
     ImGui_ImplWin32_Init(g_wnd);
     ImGui_ImplDX11_Init(g_device.Get(), g_context.Get());
 

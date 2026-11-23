@@ -149,17 +149,8 @@ void BuildMenu() {
     ImGui::Dummy(ImVec2(logo, logo));
     ImGui::SameLine(0, 12 * s);
     ImGui::BeginGroup();
-    ImGui::PushFont(g_fonts.bold);
-    {
-        const ImVec2 tp = ImGui::GetCursorScreenPos();
-        const ImVec2 ts = ImGui::CalcTextSize("NITRO");
-        ImDrawList* dl = ImGui::GetWindowDrawList();
-        const int v0 = dl->VtxBuffer.Size;
-        dl->AddText(tp, IM_COL32_WHITE, "NITRO");
-        ImGui::ShadeVertsLinearColorGradientKeepAlpha(dl, v0, dl->VtxBuffer.Size, tp, ImVec2(tp.x + ts.x, tp.y),
-                                                      nitro_ui::kCyan, nitro_ui::kPink);
-        ImGui::Dummy(ts);
-    }
+    ImGui::PushFont(g_fonts.tab);
+    ImGui::TextUnformatted("Nitro");
     ImGui::PopFont();
     ImGui::PushFont(g_fonts.caption);
     ImGui::TextColored(nitro_ui::kMuted, "%s  \xC2\xB7  %ux%u", g.apiName, g.width, g.height);
@@ -183,7 +174,7 @@ void BuildMenu() {
         const float bw = ImGui::GetContentRegionAvail().x;
         const float bh = 58 * s;
         ImDrawList* dl = ImGui::GetWindowDrawList();
-        dl->AddRectFilled(b0, ImVec2(b0.x + bw, b0.y + bh), IM_COL32(22, 26, 51, 255), 12 * s);
+        dl->AddRectFilled(b0, ImVec2(b0.x + bw, b0.y + bh), IM_COL32(255, 255, 255, 18), 14 * s);
         char real[32], out[32];
         snprintf(real, sizeof(real), "%.0f", g.realFps);
         snprintf(out, sizeof(out), "%.0f", g.fgEnabled.load() ? g.outputFps : g.realFps);
@@ -206,7 +197,7 @@ void BuildMenu() {
             ImGui::TextColored(nitro_ui::kMuted, "On screen");
         ImGui::PopFont();
         ImGui::PushFont(g_fonts.bold);
-        ImGui::TextColored(ImVec4(0.0f, 0.898f, 1.0f, 1.0f), "%s fps", out);
+        ImGui::TextColored(ImVec4(0.361f, 0.667f, 1.0f, 1.0f), "%s fps", out);
         ImGui::PopFont();
         ImGui::EndGroup();
         ImGui::SetCursorScreenPos(ImVec2(b0.x, b0.y + bh));

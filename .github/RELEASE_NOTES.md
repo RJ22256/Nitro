@@ -6,6 +6,7 @@ Adds Lossless Scaling's frame generation to **DirectX 9, 10, 11, 12, OpenGL and 
 - **Game Library:** a new tab lists your Steam, Epic Games and GOG Galaxy games with cover art, the detected graphics API and whether Nitro is installed. Hover a game to install or remove Nitro in one click. Games that ship anti-cheat are flagged and blocked.
 - **AMD FSR 1:** RCAS sharpening in every API, and EASU upscaling in DirectX 11/12 games (run the game borderless/windowed at a lower resolution). Available in the app and in the in-game menu.
 - **32-bit games:** Nitro now handles 32-bit DirectX 9/10/11, OpenGL and Vulkan games too.
+- **New look:** a PlayStation-style redesign of the app, in-game menu, setup, installer and logo.
 - **Installer:** `Nitro-Setup.exe` with Start menu/desktop shortcuts and a clean uninstaller.
 - FSR 3 isn't included: it needs the game's motion vectors and depth, which only the engine has. See the README for details.
 
