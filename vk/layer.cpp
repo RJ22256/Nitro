@@ -181,9 +181,11 @@ private:
     VkSemaphore copied_[kMaxGen] = {};
 };
 
-std::unordered_map<void*, std::unique_ptr<InstanceData>> g_instances;
-std::unordered_map<void*, std::unique_ptr<DeviceData>> g_devices;
-std::unordered_map<VkSwapchainKHR, std::unique_ptr<SwapData>> g_swapchains;
+// Never destroyed: tearing down D3D11 objects during process exit (under the
+// loader lock) can hang or crash the game as it closes.
+auto& g_instances = *new std::unordered_map<void*, std::unique_ptr<InstanceData>>();
+auto& g_devices = *new std::unordered_map<void*, std::unique_ptr<DeviceData>>();
+auto& g_swapchains = *new std::unordered_map<VkSwapchainKHR, std::unique_ptr<SwapData>>();
 
 InstanceData* FindInstance(const void* dispatchable) {
     auto it = g_instances.find(Key(dispatchable));

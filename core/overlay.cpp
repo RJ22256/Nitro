@@ -29,7 +29,7 @@ std::recursive_mutex g_ui; // ImGui is single-threaded; the window thread and th
 ImGuiContext* g_ctx = nullptr;
 nitro_ui::Fonts g_fonts;
 float g_scale = 1.0f;
-ComPtr<ID3D11Device> g_dev;
+ComPtr<ID3D11Device>& g_dev = *new ComPtr<ID3D11Device>(); // never released at process exit
 HWND g_hwnd = nullptr;
 WNDPROC g_origProc = nullptr;
 ImDrawData* g_drawData = nullptr;

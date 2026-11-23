@@ -313,7 +313,8 @@ BOOL GLState::Swap(HDC dc, BOOL(WINAPI* orig)(HDC)) {
 }
 
 std::mutex g_mutex;
-std::unordered_map<HGLRC, std::unique_ptr<GLState>> g_states;
+// Never destroyed (see dxgi_hooks.cpp).
+auto& g_states = *new std::unordered_map<HGLRC, std::unique_ptr<GLState>>();
 
 using SwapFn = BOOL(WINAPI*)(HDC);
 SwapFn g_gdiSwap = nullptr;

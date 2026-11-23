@@ -53,6 +53,7 @@ constexpr int kSlotResizeBuffers = 13;
 constexpr int kSlotGetDesc1 = 18;
 constexpr int kSlotPresent1 = 22;
 constexpr int kSlotResizeBuffers1 = 39;
+constexpr int kSlotExecuteCommandLists = 10; // ID3D12CommandQueue
 
 struct VtHooks {
     void** vt = nullptr;
@@ -75,6 +76,68 @@ const VtHooks* FindVt(void* obj) {
     for (int i = 0; i < n; ++i)
         if (g_vt[i].vt == vt) return &g_vt[i];
     return &g_vt[0];
+}
+
+// ---------------------------------------------------------------------------
+// D3D12: a swap chain can't tell us which command queue it presents on, and
+// D3D11On12 needs exactly that queue. So we note the queue when the game
+// creates the swap chain (factory hooks), and as a fallback remember the
+// direct queues the game submits work on.
+
+std::mutex g_queueMutex;
+// Never destroyed (see g_states below).
+auto& g_swapQueues = *new std::unordered_map<IDXGISwapChain*, ComPtr<ID3D12CommandQueue>>();
+
+constexpr int kMaxSeenQueues = 16;
+std::atomic<ID3D12CommandQueue*> g_seenQueues[kMaxSeenQueues];
+
+void RememberSwapQueue(IUnknown* swapChain, IUnknown* deviceOrQueue) {
+    if (!swapChain || !deviceOrQueue) return;
+    ComPtr<ID3D12CommandQueue> q;
+    if (FAILED(deviceOrQueue->QueryInterface(IID_PPV_ARGS(&q)))) return;
+    ComPtr<IDXGISwapChain> sc;
+    if (FAILED(swapChain->QueryInterface(IID_PPV_ARGS(&sc)))) return;
+    std::lock_guard<std::mutex> lock(g_queueMutex);
+    g_swapQueues[sc.Get()] = q;
+}
+
+ComPtr<ID3D12CommandQueue> QueueForSwapChain(IDXGISwapChain* sc) {
+    {
+        std::lock_guard<std::mutex> lock(g_queueMutex);
+        auto it = g_swapQueues.find(sc);
+        if (it != g_swapQueues.end()) return it->second;
+    }
+    // Fallback: a direct queue on the swap chain's device that the game uses.
+    ComPtr<ID3D12Device> dev;
+    if (FAILED(sc->GetDevice(IID_PPV_ARGS(&dev)))) return nullptr;
+    for (auto& slot : g_seenQueues) {
+        ID3D12CommandQueue* q = slot.load();
+        if (!q) break;
+        ComPtr<ID3D12Device> qd;
+        if (q->GetDesc().Type == D3D12_COMMAND_LIST_TYPE_DIRECT && SUCCEEDED(q->GetDevice(IID_PPV_ARGS(&qd))) &&
+            qd.Get() == dev.Get())
+            return q;
+    }
+    return nullptr;
+}
+
+using ExecuteCommandListsFn = void(STDMETHODCALLTYPE*)(ID3D12CommandQueue*, UINT, ID3D12CommandList* const*);
+ExecuteCommandListsFn g_origExecute = nullptr;
+
+void STDMETHODCALLTYPE HookExecuteCommandLists(ID3D12CommandQueue* q, UINT n, ID3D12CommandList* const* lists) {
+    for (auto& slot : g_seenQueues) {
+        ID3D12CommandQueue* cur = slot.load(std::memory_order_relaxed);
+        if (cur == q) break;
+        if (!cur) {
+            ID3D12CommandQueue* expected = nullptr;
+            if (slot.compare_exchange_strong(expected, q)) {
+                q->AddRef(); // kept for the life of the process
+                break;
+            }
+            if (expected == q) break;
+        }
+    }
+    g_origExecute(q, n, lists);
 }
 
 // ---------------------------------------------------------------------------
@@ -104,6 +167,7 @@ struct PresentCall {
 class SwapState {
 public:
     bool failed = false;
+    bool retry_ = false; // Init failed only because the D3D12 queue wasn't known yet
 
     bool Init(IDXGISwapChain* sc);
     bool SameDevice(IDXGISwapChain* sc) const;
@@ -232,12 +296,18 @@ bool SwapState::Init(IDXGISwapChain* sc) {
         Log("Attached to a D3D10 swap chain (frame gen on a separate D3D11 device)");
         return true;
     } else {
-        if (FAILED(sc->GetDevice(IID_PPV_ARGS(&queue_)))) {
+        ComPtr<ID3D12Device> d12;
+        if (FAILED(sc->GetDevice(IID_PPV_ARGS(&d12)))) {
             Log("Swap chain is neither D3D11 nor D3D12 - skipping");
             return false;
         }
-        ComPtr<ID3D12Device> d12;
-        if (FAILED(queue_->GetDevice(IID_PPV_ARGS(&d12)))) return false;
+        queue_ = QueueForSwapChain(sc);
+        if (!queue_) {
+            // Try again on a later frame: the game may not have submitted work yet.
+            Log("D3D12 swap chain: its command queue isn't known yet");
+            retry_ = true;
+            return false;
+        }
 
         HMODULE d3d11 = GetModuleHandleW(L"d3d11.dll");
         if (!d3d11) d3d11 = LoadLibraryW(L"d3d11.dll");
@@ -275,10 +345,7 @@ bool SwapState::SameDevice(IDXGISwapChain* sc) const {
         ComPtr<ID3D10Device> d;
         return SUCCEEDED(sc->GetDevice(IID_PPV_ARGS(&d))) && d.Get() == deviceKey_;
     }
-    if (d3d12_) {
-        ComPtr<ID3D12CommandQueue> q;
-        return SUCCEEDED(sc->GetDevice(IID_PPV_ARGS(&q))) && q.Get() == deviceKey_;
-    }
+    if (d3d12_) return QueueForSwapChain(sc).Get() == deviceKey_;
     ComPtr<ID3D11Device> d;
     return SUCCEEDED(sc->GetDevice(IID_PPV_ARGS(&d))) && d.Get() == deviceKey_;
 }
@@ -686,12 +753,19 @@ HRESULT SwapState::Present(const PresentCall& call) {
 }
 
 std::mutex g_stateMutex;
-std::unordered_map<IDXGISwapChain*, std::unique_ptr<SwapState>> g_states;
+// Never destroyed: releasing D3D objects during process exit (under the
+// loader lock) can hang or crash the game as it closes.
+auto& g_states = *new std::unordered_map<IDXGISwapChain*, std::unique_ptr<SwapState>>();
 
 SwapState* StateFor(IDXGISwapChain* sc) {
     std::lock_guard<std::mutex> lock(g_stateMutex);
     auto& slot = g_states[sc];
     if (slot && !slot->Scaling() && !slot->SameDevice(sc)) slot.reset();
+    static int retries = 0;
+    if (slot && slot->retry_ && slot->failed && retries < 600 && QueueForSwapChain(sc)) {
+        ++retries;
+        slot.reset();
+    }
     if (!slot) {
         slot = std::make_unique<SwapState>();
         if (!slot->Init(sc)) slot->failed = true;
@@ -818,6 +892,98 @@ void HookSwapChain(IDXGISwapChain* sc) {
         has1 ? "yes" : "no", has3 ? "yes" : "no");
 }
 
+// IDXGIFactory / IDXGIFactory2 vtable slots
+constexpr int kSlotCreateSwapChain = 10;
+constexpr int kSlotCreateForHwnd = 15;
+constexpr int kSlotCreateForCoreWindow = 16;
+constexpr int kSlotCreateForComposition = 24;
+
+using CreateSwapChainFn = HRESULT(STDMETHODCALLTYPE*)(IDXGIFactory*, IUnknown*, DXGI_SWAP_CHAIN_DESC*,
+                                                      IDXGISwapChain**);
+using CreateForHwndFn = HRESULT(STDMETHODCALLTYPE*)(IDXGIFactory2*, IUnknown*, HWND, const DXGI_SWAP_CHAIN_DESC1*,
+                                                    const DXGI_SWAP_CHAIN_FULLSCREEN_DESC*, IDXGIOutput*,
+                                                    IDXGISwapChain1**);
+using CreateForCoreWindowFn = HRESULT(STDMETHODCALLTYPE*)(IDXGIFactory2*, IUnknown*, IUnknown*,
+                                                          const DXGI_SWAP_CHAIN_DESC1*, IDXGIOutput*,
+                                                          IDXGISwapChain1**);
+using CreateForCompositionFn = HRESULT(STDMETHODCALLTYPE*)(IDXGIFactory2*, IUnknown*, const DXGI_SWAP_CHAIN_DESC1*,
+                                                           IDXGIOutput*, IDXGISwapChain1**);
+
+struct FactoryHooks {
+    void** vt = nullptr;
+    CreateSwapChainFn create = nullptr;
+    CreateForHwndFn forHwnd = nullptr;
+    CreateForCoreWindowFn forCoreWindow = nullptr;
+    CreateForCompositionFn forComposition = nullptr;
+};
+constexpr int kMaxFactoryVtables = 4;
+FactoryHooks g_fvt[kMaxFactoryVtables];
+std::atomic<int> g_fvtCount{0};
+
+const FactoryHooks* FindFactoryVt(void* obj) {
+    void** vt = *reinterpret_cast<void***>(obj);
+    const int n = g_fvtCount.load();
+    for (int i = 0; i < n; ++i)
+        if (g_fvt[i].vt == vt) return &g_fvt[i];
+    return &g_fvt[0];
+}
+
+void OnSwapChainCreated(IUnknown* deviceOrQueue, IUnknown* swapChain) {
+    RememberSwapQueue(swapChain, deviceOrQueue);
+    ComPtr<IDXGISwapChain> sc;
+    if (swapChain && SUCCEEDED(swapChain->QueryInterface(IID_PPV_ARGS(&sc)))) HookSwapChain(sc.Get());
+}
+
+HRESULT STDMETHODCALLTYPE HookCreateSwapChain(IDXGIFactory* f, IUnknown* dev, DXGI_SWAP_CHAIN_DESC* d,
+                                              IDXGISwapChain** out) {
+    const HRESULT hr = FindFactoryVt(f)->create(f, dev, d, out);
+    if (SUCCEEDED(hr) && out && *out) OnSwapChainCreated(dev, *out);
+    return hr;
+}
+
+HRESULT STDMETHODCALLTYPE HookCreateForHwnd(IDXGIFactory2* f, IUnknown* dev, HWND wnd, const DXGI_SWAP_CHAIN_DESC1* d,
+                                            const DXGI_SWAP_CHAIN_FULLSCREEN_DESC* fs, IDXGIOutput* o,
+                                            IDXGISwapChain1** out) {
+    const HRESULT hr = FindFactoryVt(f)->forHwnd(f, dev, wnd, d, fs, o, out);
+    if (SUCCEEDED(hr) && out && *out) OnSwapChainCreated(dev, *out);
+    return hr;
+}
+
+HRESULT STDMETHODCALLTYPE HookCreateForCoreWindow(IDXGIFactory2* f, IUnknown* dev, IUnknown* wnd,
+                                                  const DXGI_SWAP_CHAIN_DESC1* d, IDXGIOutput* o,
+                                                  IDXGISwapChain1** out) {
+    const HRESULT hr = FindFactoryVt(f)->forCoreWindow(f, dev, wnd, d, o, out);
+    if (SUCCEEDED(hr) && out && *out) OnSwapChainCreated(dev, *out);
+    return hr;
+}
+
+HRESULT STDMETHODCALLTYPE HookCreateForComposition(IDXGIFactory2* f, IUnknown* dev, const DXGI_SWAP_CHAIN_DESC1* d,
+                                                   IDXGIOutput* o, IDXGISwapChain1** out) {
+    const HRESULT hr = FindFactoryVt(f)->forComposition(f, dev, d, o, out);
+    if (SUCCEEDED(hr) && out && *out) OnSwapChainCreated(dev, *out);
+    return hr;
+}
+
+void HookFactory(IDXGIFactory2* factory) {
+    void** vt = *reinterpret_cast<void***>(factory);
+    const int n = g_fvtCount.load();
+    for (int i = 0; i < n; ++i)
+        if (g_fvt[i].vt == vt) return;
+    if (n >= kMaxFactoryVtables) return;
+    FactoryHooks& h = g_fvt[n];
+    h.vt = vt;
+    h.create = reinterpret_cast<CreateSwapChainFn>(vt[kSlotCreateSwapChain]);
+    h.forHwnd = reinterpret_cast<CreateForHwndFn>(vt[kSlotCreateForHwnd]);
+    h.forCoreWindow = reinterpret_cast<CreateForCoreWindowFn>(vt[kSlotCreateForCoreWindow]);
+    h.forComposition = reinterpret_cast<CreateForCompositionFn>(vt[kSlotCreateForComposition]);
+    g_fvtCount = n + 1;
+    WriteSlot(vt, kSlotCreateSwapChain, reinterpret_cast<void*>(&HookCreateSwapChain));
+    WriteSlot(vt, kSlotCreateForHwnd, reinterpret_cast<void*>(&HookCreateForHwnd));
+    WriteSlot(vt, kSlotCreateForCoreWindow, reinterpret_cast<void*>(&HookCreateForCoreWindow));
+    WriteSlot(vt, kSlotCreateForComposition, reinterpret_cast<void*>(&HookCreateForComposition));
+    Log("Hooked DXGI factory vtable %p", static_cast<void*>(vt));
+}
+
 void HookFromDevice(IDXGIFactory2* factory, IUnknown* deviceOrQueue, bool legacyToo) {
     if (HWND wnd = CreateDummyWindow()) {
         DXGI_SWAP_CHAIN_DESC1 d{};
@@ -907,12 +1073,20 @@ void InstallDxgiHooks() {
                 D3D12_COMMAND_QUEUE_DESC qd{};
                 qd.Type = D3D12_COMMAND_LIST_TYPE_DIRECT;
                 ComPtr<ID3D12CommandQueue> q;
-                if (SUCCEEDED(d12->CreateCommandQueue(&qd, IID_PPV_ARGS(&q))))
+                if (SUCCEEDED(d12->CreateCommandQueue(&qd, IID_PPV_ARGS(&q)))) {
                     HookFromDevice(factory.Get(), q.Get(), false);
+                    void** qvt = *reinterpret_cast<void***>(q.Get());
+                    if (!g_origExecute) {
+                        g_origExecute = reinterpret_cast<ExecuteCommandListsFn>(qvt[kSlotExecuteCommandLists]);
+                        WriteSlot(qvt, kSlotExecuteCommandLists, reinterpret_cast<void*>(&HookExecuteCommandLists));
+                    }
+                }
             }
         }
     }
 
+    // Last, so Nitro's own probe swap chains above don't go through it.
+    HookFactory(factory.Get());
     Log("%d swap chain vtable(s) hooked", g_vtCount.load());
 }
 

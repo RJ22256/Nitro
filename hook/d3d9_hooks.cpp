@@ -70,7 +70,9 @@ private:
 };
 
 std::mutex g_mutex;
-std::unordered_map<IDirect3DDevice9*, std::unique_ptr<D9State>> g_states;
+// Never destroyed: releasing D3D objects during process exit (under the
+// loader lock) can hang or crash the game as it closes.
+auto& g_states = *new std::unordered_map<IDirect3DDevice9*, std::unique_ptr<D9State>>();
 
 bool D9State::Ensure(IDirect3DDevice9* dev, const D3DSURFACE_DESC& d) {
     const int mult = G().multiplier.load();

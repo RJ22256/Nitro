@@ -2,6 +2,8 @@
 
 #include <windows.h>
 
+#include <share.h>
+
 #include <cstdarg>
 #include <cstdio>
 #include <mutex>
@@ -16,7 +18,8 @@ FILE* g_log = nullptr;
 void LogInit(const std::wstring& path) {
     std::lock_guard<std::mutex> lock(g_logMutex);
     if (g_log) return;
-    _wfopen_s(&g_log, path.c_str(), L"w");
+    // Shared, so the log can be read while the game is still running.
+    g_log = _wfsopen(path.c_str(), L"w", _SH_DENYNO);
 }
 
 void Log(const char* fmt, ...) {
