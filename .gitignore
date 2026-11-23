@@ -1,0 +1,7 @@
+build/
+out/
+.vs/
+*.user
+CMakeSettings.json
+# never commit Lossless Scaling files
+Lossless.dll

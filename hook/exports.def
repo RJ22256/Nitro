@@ -1,0 +1,24 @@
+EXPORTS
+    ApplyCompatResolutionQuirking=Thunk_ApplyCompatResolutionQuirking
+    CompatString=Thunk_CompatString
+    CompatValue=Thunk_CompatValue
+    CreateDXGIFactory=Thunk_CreateDXGIFactory
+    CreateDXGIFactory1=Thunk_CreateDXGIFactory1
+    CreateDXGIFactory2=Thunk_CreateDXGIFactory2
+    DXGID3D10CreateDevice=Thunk_DXGID3D10CreateDevice
+    DXGID3D10CreateLayeredDevice=Thunk_DXGID3D10CreateLayeredDevice
+    DXGID3D10GetLayeredDeviceSize=Thunk_DXGID3D10GetLayeredDeviceSize
+    DXGID3D10RegisterLayers=Thunk_DXGID3D10RegisterLayers
+    DXGIDeclareAdapterRemovalSupport=Thunk_DXGIDeclareAdapterRemovalSupport
+    DXGIDisableVBlankVirtualization=Thunk_DXGIDisableVBlankVirtualization
+    DXGIDumpJournal=Thunk_DXGIDumpJournal
+    DXGIGetDebugInterface1=Thunk_DXGIGetDebugInterface1
+    DXGIReportAdapterConfiguration=Thunk_DXGIReportAdapterConfiguration
+    PIXBeginCapture=Thunk_PIXBeginCapture
+    PIXEndCapture=Thunk_PIXEndCapture
+    PIXGetCaptureState=Thunk_PIXGetCaptureState
+    SetAppCompatStringPointer=Thunk_SetAppCompatStringPointer
+    UpdateHMDEmulationStatus=Thunk_UpdateHMDEmulationStatus
+    DXGIRevertToSxS=Thunk_DXGIRevertToSxS
+    Nitro_InitHooks
+    Nitro_Marker DATA
