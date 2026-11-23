@@ -185,6 +185,7 @@ class SwapState {
 public:
     bool failed = false;
     bool retry_ = false; // Init failed only because the D3D12 queue wasn't known yet
+    bool loggedFirstGen_ = false;
 
     bool Init(IDXGISwapChain* sc);
     bool SameDevice(IDXGISwapChain* sc) const;
@@ -217,6 +218,19 @@ private:
     bool BeginFrame(IDXGISwapChain* sc, ComPtr<ID3D11Texture2D>& bb);
     void EndFrame();
     void WriteGenerated(int i, ID3D11Texture2D* bb);
+    std::string DeviceRemovedReason() {
+        HRESULT r = S_OK;
+        if (queue_) {
+            ComPtr<ID3D12Device> d;
+            if (SUCCEEDED(queue_->GetDevice(IID_PPV_ARGS(&d)))) r = d->GetDeviceRemovedReason();
+        } else if (dev_) {
+            r = dev_->GetDeviceRemovedReason();
+        }
+        if (r == S_OK) return {};
+        char buf[48];
+        snprintf(buf, sizeof(buf), ", device removed: 0x%08X", static_cast<unsigned>(r));
+        return buf;
+    }
 
     bool d3d12_ = false;
     bool d3d10_ = false;
@@ -550,7 +564,12 @@ HRESULT SwapState::PresentD3D10(const PresentCall& call, const DXGI_SWAP_CHAIN_D
         dev10_->CopyResource(bb.Get(), out10_[k].Get());
         bb.Reset();
         const HRESULT hr = call.Generated(sync, genFlags);
-        if (FAILED(hr)) return hr;
+        if (FAILED(hr)) {
+            Log("Presenting a generated frame failed (0x%08X) - frame generation off for this game window",
+                static_cast<unsigned>(hr));
+            fgFailed_ = true;
+            return call.Real(call.sync, call.flags);
+        }
         if (FAILED(vt_.getBuffer(call.sc, 0, IID_PPV_ARGS(&bb)))) return call.Real(sync, flags);
     }
     if (bridge_->RealOutputUsed())
@@ -759,7 +778,18 @@ HRESULT SwapState::Present(const PresentCall& call) {
         EndFrame();
         bb.Reset();
         const HRESULT hr = call.Generated(sync, genFlags);
-        if (FAILED(hr)) return hr;
+        if (FAILED(hr)) {
+            // Never hand the game an error it didn't cause: switch frame gen
+            // off for this swap chain and show the real frame as usual.
+            Log("Presenting a generated frame failed (0x%08X%s) - frame generation off for this game window",
+                static_cast<unsigned>(hr), DeviceRemovedReason().c_str());
+            fgFailed_ = true;
+            return call.Real(call.sync, call.flags);
+        }
+        if (!loggedFirstGen_) {
+            loggedFirstGen_ = true;
+            Log("First generated frame shown");
+        }
         if (!BeginFrame(call.sc, bb)) return call.Real(sync, flags);
     }
     if (n > 0) ctx_->CopyResource(bb.Get(), fg_->CurrentFrame()); // put the real frame back

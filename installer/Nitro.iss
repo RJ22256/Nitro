@@ -63,6 +63,7 @@ Source: "{#SourceDir}\NitroHook32.dll"; DestDir: "{app}"; Flags: ignoreversion
 Source: "{#SourceDir}\NitroVk32.dll"; DestDir: "{app}"; Flags: ignoreversion
 Source: "{#SourceDir}\NitroVk32.json"; DestDir: "{app}"; Flags: ignoreversion
 Source: "{#SourceDir}\NitroInject32.exe"; DestDir: "{app}"; Flags: ignoreversion
+Source: "{#SourceDir}\*.pdb"; DestDir: "{app}"; Flags: ignoreversion skipifsourcedoesntexist
 Source: "{#SourceDir}\Fonts\*"; DestDir: "{app}\Fonts"; Flags: ignoreversion
 Source: "..\README.md"; DestDir: "{app}"; Flags: ignoreversion
 Source: "..\THIRD_PARTY_NOTICES.md"; DestDir: "{app}"; Flags: ignoreversion

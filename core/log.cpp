@@ -36,6 +36,18 @@ void Log(const char* fmt, ...) {
     std::fflush(g_log);
 }
 
+void LogNoWait(const char* text) {
+    // Used from the crash handler: never block on a lock the crashed thread holds.
+    if (!g_logMutex.try_lock()) return;
+    if (g_log) {
+        SYSTEMTIME t;
+        GetLocalTime(&t);
+        std::fprintf(g_log, "[%02d:%02d:%02d.%03d] %s\n", t.wHour, t.wMinute, t.wSecond, t.wMilliseconds, text);
+        std::fflush(g_log);
+    }
+    g_logMutex.unlock();
+}
+
 std::string Narrow(const std::wstring& s) {
     if (s.empty()) return {};
     const int n = WideCharToMultiByte(CP_UTF8, 0, s.c_str(), static_cast<int>(s.size()),

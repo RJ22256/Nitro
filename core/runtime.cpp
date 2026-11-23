@@ -3,6 +3,7 @@
 #include <cwchar>
 #include <cwctype>
 
+#include "crash.h"
 #include "log.h"
 
 namespace lsfgi {
@@ -43,6 +44,14 @@ bool LoadRuntime(HMODULE self, const wchar_t* logName) {
     }
     LogInit(log);
     Log("Nitro loaded into %s", Narrow(exe).c_str());
+    {
+        // Crash reports name Nitro's functions if NitroHook.pdb is in the
+        // Nitro folder (where Nitro.shaders is) or next to this DLL.
+        std::wstring symbols = g.dir;
+        const size_t slash = g.cfg.shaders.find_last_of(L"\\/");
+        if (slash != std::wstring::npos) symbols += L";" + g.cfg.shaders.substr(0, slash);
+        InstallCrashLogger(symbols);
+    }
     if (g.cfg.losslessDll.empty()) g.cfg.losslessDll = g.dir + L"\\Lossless.dll";
     // Prefer the imported shader pack; fall back to Lossless.dll.
     std::wstring source = g.cfg.losslessDll;

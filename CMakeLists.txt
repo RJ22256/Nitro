@@ -19,6 +19,11 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 # Static CRT so the DLLs work inside any game without extra redistributables.
 set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
 add_compile_definitions(UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX)
+# Release builds also produce .pdb files, so crash reports in Nitro.log can
+# name Nitro's functions. /OPT:REF /OPT:ICF keep the binaries as small as before.
+cmake_policy(SET CMP0141 NEW)
+set(CMAKE_MSVC_DEBUG_INFORMATION_FORMAT "ProgramDatabase")
+add_link_options($<$<CONFIG:Release>:/DEBUG> $<$<CONFIG:Release>:/OPT:REF> $<$<CONFIG:Release>:/OPT:ICF>)
 if(NOT NITRO_64)
     set(CMAKE_ASM_MASM_FLAGS "${CMAKE_ASM_MASM_FLAGS} /safeseh")
 endif()
@@ -86,6 +91,7 @@ add_library(nitro_core STATIC
     core/fsr.cpp
     core/runtime.cpp
     core/overlay.cpp
+    core/crash.cpp
     core/log.cpp)
 target_compile_options(nitro_core PRIVATE ${NITRO_WARNINGS})
 target_include_directories(nitro_core SYSTEM PRIVATE ${FSR_DIR})
