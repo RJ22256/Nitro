@@ -18,11 +18,17 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Configure
+      - name: Configure (64-bit)
         run: cmake -S . -B build -A x64
 
-      - name: Build
+      - name: Build (64-bit)
         run: cmake --build build --config Release
+
+      - name: Configure (32-bit)
+        run: cmake -S . -B build32 -A Win32
+
+      - name: Build (32-bit)
+        run: cmake --build build32 --config Release
 
       - name: Package
         shell: pwsh
@@ -30,6 +36,7 @@ jobs:
           $pkg = "package/Nitro"
           New-Item -ItemType Directory -Force $pkg | Out-Null
           Copy-Item build/dist/Nitro.exe, build/dist/NitroHook.dll, build/dist/NitroVk.dll, build/dist/NitroVk.json $pkg
+          Copy-Item build32/dist/NitroHook32.dll, build32/dist/NitroVk32.dll, build32/dist/NitroVk32.json, build32/dist/NitroInject32.exe $pkg
           Copy-Item README.md, THIRD_PARTY_NOTICES.md $pkg
           Compress-Archive -Path $pkg -DestinationPath package/Nitro-x64.zip -Force
 

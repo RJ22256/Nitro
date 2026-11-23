@@ -16,6 +16,7 @@
 
 #include "blit.h"
 #include "framegen.h"
+#include "fsr.h"
 
 namespace lsfgi {
 
@@ -55,6 +56,9 @@ public:
     ID3D11Texture2D* RealOutput() const { return real_.Get(); }
     HANDLE RealOutputHandle() const { return realHandle_; }
     ID3D11DeviceContext* Context() const { return ctx_.Get(); }
+    // True when the last Run() left the real frame (sharpened and/or with the
+    // menu on it) in RealOutput(); the host must present that, not its own copy.
+    bool RealOutputUsed() const { return realUsed_; }
     void Reset();
 
     // CPU path
@@ -84,6 +88,9 @@ private:
     std::unique_ptr<FrameGen> fg_;
     Blitter blit_;
     bool blitReady_ = false;
+    Fsr fsr_;
+    bool fsrTried_ = false, fsrReady_ = false;
+    bool realUsed_ = false;
 };
 
 // Finds a DXGI adapter by LUID or vendor id and creates a D3D11 device on it.

@@ -98,6 +98,28 @@ uint32_t ReadU32(const uint8_t* p) {
     return v;
 }
 
+struct InspectCtx {
+    DllReport* report;
+};
+
+BOOL CALLBACK CountResource(HMODULE mod, LPCWSTR, LPWSTR name, LONG_PTR param) {
+    auto* c = reinterpret_cast<InspectCtx*>(param);
+    c->report->rcdataCount++;
+    HRSRC res = FindResourceW(mod, name, MAKEINTRESOURCEW(10));
+    if (!res) return TRUE;
+    HGLOBAL loaded = LoadResource(mod, res);
+    const auto* data = loaded ? static_cast<const uint8_t*>(LockResource(loaded)) : nullptr;
+    const size_t size = SizeofResource(mod, res);
+    if (!data) return TRUE;
+    switch (ClassifyBlob(data, size)) {
+    case BlobKind::DxbcSm5: c->report->dxbc++; break;
+    case BlobKind::DxbcDxil: c->report->dxil++; break;
+    case BlobKind::Spirv: c->report->spirv++; break;
+    default: c->report->other++; break;
+    }
+    return TRUE;
+}
+
 } // namespace
 
 BlobKind ClassifyBlob(const uint8_t* data, size_t size) {
@@ -140,30 +162,9 @@ bool InspectLosslessDll(const std::wstring& path, DllReport& report, std::wstrin
         return false;
     }
 
-    struct Ctx {
-        DllReport* report;
-    } ctx{&report};
+    InspectCtx ctx{&report};
 
-    EnumResourceNamesW(
-        module.handle, kRcData,
-        [](HMODULE mod, LPCWSTR, LPWSTR name, LONG_PTR param) -> BOOL {
-            auto* c = reinterpret_cast<Ctx*>(param);
-            c->report->rcdataCount++;
-            HRSRC res = FindResourceW(mod, name, MAKEINTRESOURCEW(10));
-            if (!res) return TRUE;
-            HGLOBAL loaded = LoadResource(mod, res);
-            const auto* data = loaded ? static_cast<const uint8_t*>(LockResource(loaded)) : nullptr;
-            const size_t size = SizeofResource(mod, res);
-            if (!data) return TRUE;
-            switch (ClassifyBlob(data, size)) {
-            case BlobKind::DxbcSm5: c->report->dxbc++; break;
-            case BlobKind::DxbcDxil: c->report->dxil++; break;
-            case BlobKind::Spirv: c->report->spirv++; break;
-            default: c->report->other++; break;
-            }
-            return TRUE;
-        },
-        reinterpret_cast<LONG_PTR>(&ctx));
+    EnumResourceNamesW(module.handle, kRcData, &CountResource, reinterpret_cast<LONG_PTR>(&ctx));
 
     report.detectedOffset = DetectOffset(module.handle);
     if (report.detectedOffset < 0) {

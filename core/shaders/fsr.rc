@@ -1,0 +1,4 @@
+// Embeds AMD FidelityFX FSR 1 shader sources (MIT) into the Nitro DLLs.
+FFX_A_H RCDATA "ffx_a.h"
+FFX_FSR1_H RCDATA "ffx_fsr1.h"
+NITRO_FSR_HLSL RCDATA "fsr_pass.hlsl"

@@ -19,6 +19,7 @@
 #include "../core/blit.h"
 #include "../core/bridge.h"
 #include "../core/framegen.h"
+#include "../core/fsr.h"
 #include "../core/log.h"
 #include "../core/overlay.h"
 #include "../core/runtime.h"
@@ -40,10 +41,16 @@ using ResizeBuffersFn = HRESULT(STDMETHODCALLTYPE*)(IDXGISwapChain*, UINT, UINT,
 using ResizeBuffers1Fn = HRESULT(STDMETHODCALLTYPE*)(IDXGISwapChain3*, UINT, UINT, UINT,
                                                      DXGI_FORMAT, UINT, const UINT*,
                                                      IUnknown* const*);
+using GetBufferFn = HRESULT(STDMETHODCALLTYPE*)(IDXGISwapChain*, UINT, REFIID, void**);
+using GetDescFn = HRESULT(STDMETHODCALLTYPE*)(IDXGISwapChain*, DXGI_SWAP_CHAIN_DESC*);
+using GetDesc1Fn = HRESULT(STDMETHODCALLTYPE*)(IDXGISwapChain1*, DXGI_SWAP_CHAIN_DESC1*);
 
 // IDXGISwapChain / IDXGISwapChain1 / IDXGISwapChain3 vtable slots
 constexpr int kSlotPresent = 8;
+constexpr int kSlotGetBuffer = 9;
+constexpr int kSlotGetDesc = 12;
 constexpr int kSlotResizeBuffers = 13;
+constexpr int kSlotGetDesc1 = 18;
 constexpr int kSlotPresent1 = 22;
 constexpr int kSlotResizeBuffers1 = 39;
 
@@ -53,6 +60,9 @@ struct VtHooks {
     Present1Fn present1 = nullptr;
     ResizeBuffersFn resize = nullptr;
     ResizeBuffers1Fn resize1 = nullptr;
+    GetBufferFn getBuffer = nullptr;
+    GetDescFn getDesc = nullptr;
+    GetDesc1Fn getDesc1 = nullptr;
 };
 
 constexpr int kMaxVtables = 8;
@@ -100,8 +110,25 @@ public:
     HRESULT Present(const PresentCall& call);
     void ReleaseBuffers();
 
+    // FSR 1 upscaling: the game renders into stand-in ("proxy") back buffers
+    // at the size it asked for, and Nitro upscales them into the real,
+    // window-sized buffers.
+    bool Scaling() const { return scaling_; }
+    HRESULT GetProxy(IDXGISwapChain* sc, UINT idx, REFIID riid, void** out);
+    void AdjustSize(UINT& w, UINT& h) const {
+        if (scaling_ && gameW_ && gameH_) {
+            w = gameW_;
+            h = gameH_;
+        }
+    }
+    void OnGameResize(UINT w, UINT h, HWND wnd);
+
 private:
     HRESULT PresentD3D10(const PresentCall& call, const DXGI_SWAP_CHAIN_DESC& desc);
+    bool EnsureFsr();
+    void EnsureRealSize(IDXGISwapChain* sc, DXGI_SWAP_CHAIN_DESC& desc);
+    ID3D11Texture2D* ProxyForFrame(IDXGISwapChain* sc);
+    void ScalePass(IDXGISwapChain* sc, ID3D11Texture2D* bb, const DXGI_SWAP_CHAIN_DESC& desc);
     bool EnsureBridge10(UINT w, UINT h, DXGI_FORMAT fmt);
     void Wait10();
 
@@ -112,7 +139,19 @@ private:
 
     bool d3d12_ = false;
     bool d3d10_ = false;
+    bool fgFailed_ = false;
     IUnknown* deviceKey_ = nullptr;
+    const VtHooks* vt_ = nullptr;
+
+    // FSR 1
+    Fsr fsr_;
+    bool fsrTried_ = false, fsrReady_ = false;
+    bool scaling_ = false;
+    UINT gameW_ = 0, gameH_ = 0;
+    ComPtr<ID3D11Texture2D> proxy11_;
+    std::vector<ComPtr<ID3D12Resource>> proxy12_;
+    std::unordered_map<ID3D12Resource*, ComPtr<ID3D11Texture2D>> wrappedProxy_;
+    ID3D11Texture2D* acquiredProxy_ = nullptr;
 
     // D3D10 games: frame gen runs on Nitro's own D3D11 device (shared textures)
     ComPtr<ID3D10Device> dev10_;
@@ -146,6 +185,7 @@ private:
 };
 
 bool SwapState::Init(IDXGISwapChain* sc) {
+    vt_ = FindVt(sc);
     ComPtr<ID3D11Device> d11;
     if (SUCCEEDED(sc->GetDevice(IID_PPV_ARGS(&d11)))) {
         if (d11->GetFeatureLevel() < D3D_FEATURE_LEVEL_11_0) {
@@ -223,6 +263,8 @@ bool SwapState::Init(IDXGISwapChain* sc) {
 
     std::string err;
     blitReady_ = blit_.Init(dev_.Get(), err);
+    scaling_ = G().cfg.fsrMode == 2 && EnsureFsr();
+    if (scaling_) Log("FSR 1 upscaling on for this swap chain");
     if (!blitReady_) Log("Blitter unavailable (%s); only RGBA/10-bit/FP16 swap chains will work", err.c_str());
     return true;
 }
@@ -285,7 +327,7 @@ bool SwapState::EnsureFrameGen(const DXGI_SWAP_CHAIN_DESC& d) {
 bool SwapState::BeginFrame(IDXGISwapChain* sc, ComPtr<ID3D11Texture2D>& bb) {
     bb.Reset();
     if (!d3d12_) {
-        if (FAILED(sc->GetBuffer(0, IID_PPV_ARGS(&bb)))) return false;
+        if (FAILED(vt_->getBuffer(sc, 0, IID_PPV_ARGS(&bb)))) return false;
         ctx1_->SwapDeviceContextState(ourState_.Get(), &savedState_);
         return true;
     }
@@ -294,7 +336,7 @@ bool SwapState::BeginFrame(IDXGISwapChain* sc, ComPtr<ID3D11Texture2D>& bb) {
     if (FAILED(sc->QueryInterface(IID_PPV_ARGS(&sc3)))) return false;
     const UINT idx = sc3->GetCurrentBackBufferIndex();
     ComPtr<ID3D12Resource> res;
-    if (FAILED(sc->GetBuffer(idx, IID_PPV_ARGS(&res)))) return false;
+    if (FAILED(vt_->getBuffer(sc, idx, IID_PPV_ARGS(&res)))) return false;
 
     auto it = wrapped_.find(res.Get());
     if (it == wrapped_.end()) {
@@ -339,6 +381,7 @@ void SwapState::WriteGenerated(int i, ID3D11Texture2D* bb) {
 
 void SwapState::ReleaseBuffers() {
     if (bridge_) bridge_->Reset();
+    wrappedProxy_.clear();
     if (d3d12_ && ctx_) {
         wrapped_.clear();
         ctx_->ClearState();
@@ -408,7 +451,7 @@ HRESULT SwapState::PresentD3D10(const PresentCall& call, const DXGI_SWAP_CHAIN_D
                                                      DXGI_PRESENT_DO_NOT_SEQUENCE);
 
     ComPtr<ID3D10Texture2D> bb;
-    if (FAILED(call.sc->GetBuffer(0, IID_PPV_ARGS(&bb)))) return call.Real(call.sync, call.flags);
+    if (FAILED(vt_->getBuffer(call.sc, 0, IID_PPV_ARGS(&bb)))) return call.Real(call.sync, call.flags);
     dev10_->CopyResource(in10_.Get(), bb.Get());
     Wait10();
 
@@ -424,9 +467,9 @@ HRESULT SwapState::PresentD3D10(const PresentCall& call, const DXGI_SWAP_CHAIN_D
         bb.Reset();
         const HRESULT hr = call.Generated(sync, genFlags);
         if (FAILED(hr)) return hr;
-        if (FAILED(call.sc->GetBuffer(0, IID_PPV_ARGS(&bb)))) return call.Real(sync, flags);
+        if (FAILED(vt_->getBuffer(call.sc, 0, IID_PPV_ARGS(&bb)))) return call.Real(sync, flags);
     }
-    if (drawMenu)
+    if (bridge_->RealOutputUsed())
         dev10_->CopyResource(bb.Get(), real10_.Get());
     else if (n > 0)
         dev10_->CopyResource(bb.Get(), in10_.Get());
@@ -434,21 +477,154 @@ HRESULT SwapState::PresentD3D10(const PresentCall& call, const DXGI_SWAP_CHAIN_D
     return call.Real(sync, flags);
 }
 
+bool SwapState::EnsureFsr() {
+    if (!fsrTried_) {
+        fsrTried_ = true;
+        std::string err;
+        fsrReady_ = fsr_.Init(dev_.Get(), err);
+        if (!fsrReady_) Log("FSR 1 unavailable: %s", err.c_str());
+    }
+    return fsrReady_;
+}
+
+HRESULT SwapState::GetProxy(IDXGISwapChain* sc, UINT idx, REFIID riid, void** out) {
+    DXGI_SWAP_CHAIN_DESC rd{};
+    vt_->getDesc(sc, &rd);
+    if (rd.SampleDesc.Count > 1 || !IsSupportedBackbufferFormat(rd.BufferDesc.Format)) {
+        Log("FSR upscaling needs a plain RGBA/BGRA/10-bit/FP16 swap chain - off for this game");
+        scaling_ = false;
+        return vt_->getBuffer(sc, idx, riid, out);
+    }
+    if (!gameW_ || !gameH_) {
+        gameW_ = rd.BufferDesc.Width;
+        gameH_ = rd.BufferDesc.Height;
+    }
+    if (!d3d12_) {
+        if (!proxy11_) {
+            D3D11_TEXTURE2D_DESC d{};
+            d.Width = gameW_;
+            d.Height = gameH_;
+            d.MipLevels = 1;
+            d.ArraySize = 1;
+            d.Format = rd.BufferDesc.Format;
+            d.SampleDesc.Count = 1;
+            d.Usage = D3D11_USAGE_DEFAULT;
+            d.BindFlags = D3D11_BIND_RENDER_TARGET | D3D11_BIND_SHADER_RESOURCE;
+            if (FAILED(dev_->CreateTexture2D(&d, nullptr, &proxy11_))) {
+                scaling_ = false;
+                return vt_->getBuffer(sc, idx, riid, out);
+            }
+        }
+        return proxy11_->QueryInterface(riid, out);
+    }
+    ComPtr<ID3D12Device> d12;
+    if (FAILED(queue_->GetDevice(IID_PPV_ARGS(&d12)))) return vt_->getBuffer(sc, idx, riid, out);
+    if (proxy12_.size() < rd.BufferCount) proxy12_.resize(rd.BufferCount);
+    if (idx >= proxy12_.size()) return DXGI_ERROR_INVALID_CALL;
+    if (!proxy12_[idx]) {
+        D3D12_HEAP_PROPERTIES heap{};
+        heap.Type = D3D12_HEAP_TYPE_DEFAULT;
+        D3D12_RESOURCE_DESC d{};
+        d.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
+        d.Width = gameW_;
+        d.Height = gameH_;
+        d.DepthOrArraySize = 1;
+        d.MipLevels = 1;
+        d.Format = rd.BufferDesc.Format;
+        d.SampleDesc.Count = 1;
+        d.Flags = D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET;
+        if (FAILED(d12->CreateCommittedResource(&heap, D3D12_HEAP_FLAG_NONE, &d, D3D12_RESOURCE_STATE_PRESENT,
+                                                nullptr, IID_PPV_ARGS(&proxy12_[idx]))))
+            return E_OUTOFMEMORY;
+    }
+    return proxy12_[idx]->QueryInterface(riid, out);
+}
+
+void SwapState::OnGameResize(UINT w, UINT h, HWND wnd) {
+    proxy11_.Reset();
+    wrappedProxy_.clear();
+    proxy12_.clear();
+    RECT rc{};
+    GetClientRect(wnd, &rc);
+    gameW_ = w ? w : static_cast<UINT>(rc.right - rc.left);
+    gameH_ = h ? h : static_cast<UINT>(rc.bottom - rc.top);
+}
+
+// The real buffers follow the window; the game only ever sees the proxies.
+void SwapState::EnsureRealSize(IDXGISwapChain* sc, DXGI_SWAP_CHAIN_DESC& desc) {
+    RECT rc{};
+    if (!desc.Windowed || !GetClientRect(desc.OutputWindow, &rc)) return;
+    const UINT cw = static_cast<UINT>(rc.right - rc.left), ch = static_cast<UINT>(rc.bottom - rc.top);
+    if (!cw || !ch || (cw == desc.BufferDesc.Width && ch == desc.BufferDesc.Height)) return;
+    wrapped_.clear();
+    if (d3d12_ && ctx_) {
+        ctx_->ClearState();
+        ctx_->Flush();
+    }
+    if (SUCCEEDED(vt_->resize(sc, 0, 0, 0, DXGI_FORMAT_UNKNOWN, desc.Flags))) {
+        vt_->getDesc(sc, &desc);
+        Log("FSR 1: game renders %ux%u, upscaling to %ux%u", gameW_, gameH_, desc.BufferDesc.Width,
+            desc.BufferDesc.Height);
+    }
+}
+
+ID3D11Texture2D* SwapState::ProxyForFrame(IDXGISwapChain* sc) {
+    if (!d3d12_) return proxy11_.Get();
+    ComPtr<IDXGISwapChain3> sc3;
+    if (FAILED(sc->QueryInterface(IID_PPV_ARGS(&sc3)))) return nullptr;
+    const UINT idx = sc3->GetCurrentBackBufferIndex();
+    if (idx >= proxy12_.size() || !proxy12_[idx]) return nullptr;
+    ID3D12Resource* res = proxy12_[idx].Get();
+    auto it = wrappedProxy_.find(res);
+    if (it == wrappedProxy_.end()) {
+        D3D11_RESOURCE_FLAGS flags{};
+        flags.BindFlags = D3D11_BIND_SHADER_RESOURCE;
+        ComPtr<ID3D11Texture2D> tex;
+        if (FAILED(on12_->CreateWrappedResource(res, &flags, D3D12_RESOURCE_STATE_PRESENT,
+                                                D3D12_RESOURCE_STATE_PRESENT, IID_PPV_ARGS(&tex))))
+            return nullptr;
+        it = wrappedProxy_.emplace(res, tex).first;
+    }
+    ID3D11Resource* r = it->second.Get();
+    on12_->AcquireWrappedResources(&r, 1);
+    acquiredProxy_ = it->second.Get();
+    return acquiredProxy_;
+}
+
+void SwapState::ScalePass(IDXGISwapChain* sc, ID3D11Texture2D* bb, const DXGI_SWAP_CHAIN_DESC& desc) {
+    ID3D11Texture2D* proxy = ProxyForFrame(sc);
+    if (!proxy) return;
+    D3D11_TEXTURE2D_DESC pd{};
+    proxy->GetDesc(&pd);
+    const UINT w = desc.BufferDesc.Width, h = desc.BufferDesc.Height;
+    const bool same = pd.Width == w && pd.Height == h;
+    if (!fsr_.Apply(ctx_.Get(), proxy, pd.Format, pd.Width, pd.Height, bb, desc.BufferDesc.Format, w, h, !same,
+                    G().cfg.fsrSharpness) &&
+        same)
+        ctx_->CopyResource(bb, proxy);
+    if (acquiredProxy_) {
+        ID3D11Resource* r = acquiredProxy_;
+        on12_->ReleaseWrappedResources(&r, 1);
+        acquiredProxy_ = nullptr;
+    }
+}
+
 HRESULT SwapState::Present(const PresentCall& call) {
     auto& g = G();
-    const bool generate = g.fgEnabled.load();
-    const bool menu = OverlayVisible();
-    if (!generate) {
+    if (!g.fgEnabled.load()) {
         if (fg_) fg_->Reset();
         if (bridge_) bridge_->Reset();
     }
-    if (failed || (!generate && !menu)) {
+    const bool generate = g.fgEnabled.load() && !fgFailed_;
+    const bool menu = OverlayVisible();
+    const bool sharpen = g.cfg.fsrMode >= 1;
+    if (failed || (!scaling_ && !generate && !menu && !sharpen)) {
         NoteFrame(0, d3d12_ ? "DirectX 12" : d3d10_ ? "DirectX 10" : "DirectX 11", w_, h_);
         return call.Real(call.sync, call.flags);
     }
 
     DXGI_SWAP_CHAIN_DESC desc{};
-    if (FAILED(call.sc->GetDesc(&desc))) return call.Real(call.sync, call.flags);
+    if (FAILED(vt_->getDesc(call.sc, &desc))) return call.Real(call.sync, call.flags);
     if (desc.SampleDesc.Count > 1 || !IsSupportedBackbufferFormat(desc.BufferDesc.Format)) {
         if (!warnedFormat_) {
             Log("Unsupported back buffer (format %d, %u samples) - passing through",
@@ -458,18 +634,20 @@ HRESULT SwapState::Present(const PresentCall& call) {
         return call.Real(call.sync, call.flags);
     }
     if (d3d10_) return PresentD3D10(call, desc);
+    if (scaling_) EnsureRealSize(call.sc, desc);
     w_ = desc.BufferDesc.Width;
     h_ = desc.BufferDesc.Height;
-    if (generate && !EnsureFrameGen(desc)) {
-        failed = true;
-        return call.Real(call.sync, call.flags);
+    bool gen = generate;
+    if (gen && !EnsureFrameGen(desc)) {
+        fgFailed_ = true;
+        gen = false;
     }
 
     // With vsync pacing every present waits for its own refresh, so the
     // generated frames are spread evenly and the game is naturally held to
     // refresh / multiplier real fps.
     UINT sync = call.sync, flags = call.flags;
-    if (g.cfg.vsyncPacing) {
+    if (g.cfg.vsyncPacing && gen) {
         if (sync == 0) sync = 1;
         flags &= ~static_cast<UINT>(DXGI_PRESENT_ALLOW_TEARING);
     }
@@ -479,8 +657,15 @@ HRESULT SwapState::Present(const PresentCall& call) {
     ComPtr<ID3D11Texture2D> bb;
     if (!BeginFrame(call.sc, bb)) return call.Real(call.sync, call.flags);
 
+    // FSR 1 first, so frame generation works on the finished, full-size image.
+    if (scaling_)
+        ScalePass(call.sc, bb.Get(), desc);
+    else if (sharpen && EnsureFsr())
+        fsr_.Apply(ctx_.Get(), bb.Get(), desc.BufferDesc.Format, w_, h_, bb.Get(), desc.BufferDesc.Format, w_, h_,
+                   false, g.cfg.fsrSharpness);
+
     const FramePlan plan = PlanFrame(desc.OutputWindow);
-    const int n = generate && fg_ ? fg_->Process(ctx_.Get(), bb.Get(), plan.gens, plan.denom) : 0;
+    const int n = gen && fg_ ? fg_->Process(ctx_.Get(), bb.Get(), plan.gens, plan.denom) : 0;
     const char* api = d3d12_ ? "DirectX 12" : "DirectX 11";
     NoteFrame(n, api, w_, h_);
     const bool drawMenu = menu && OverlayBegin(dev_.Get(), ctx_.Get(), desc.OutputWindow, w_, h_);
@@ -503,31 +688,67 @@ HRESULT SwapState::Present(const PresentCall& call) {
 std::mutex g_stateMutex;
 std::unordered_map<IDXGISwapChain*, std::unique_ptr<SwapState>> g_states;
 
+SwapState* StateFor(IDXGISwapChain* sc) {
+    std::lock_guard<std::mutex> lock(g_stateMutex);
+    auto& slot = g_states[sc];
+    if (slot && !slot->Scaling() && !slot->SameDevice(sc)) slot.reset();
+    if (!slot) {
+        slot = std::make_unique<SwapState>();
+        if (!slot->Init(sc)) slot->failed = true;
+    }
+    return slot.get();
+}
+
+SwapState* FindState(IDXGISwapChain* sc) {
+    std::lock_guard<std::mutex> lock(g_stateMutex);
+    auto it = g_states.find(sc);
+    return it == g_states.end() ? nullptr : it->second.get();
+}
+
 HRESULT HandlePresent(const PresentCall& call) {
     if (InHook() || (call.flags & DXGI_PRESENT_TEST)) return call.Real(call.sync, call.flags);
     InHook() = true;
     PollHotkeys();
-
-    SwapState* state = nullptr;
-    {
-        std::lock_guard<std::mutex> lock(g_stateMutex);
-        auto& slot = g_states[call.sc];
-        if (slot && !slot->SameDevice(call.sc)) slot.reset();
-        if (!slot) {
-            slot = std::make_unique<SwapState>();
-            if (!slot->Init(call.sc)) slot->failed = true;
-        }
-        state = slot.get();
-    }
+    SwapState* state = StateFor(call.sc);
     const HRESULT hr = state->Present(call);
     InHook() = false;
     return hr;
 }
 
-void OnResize(IDXGISwapChain* sc) {
-    std::lock_guard<std::mutex> lock(g_stateMutex);
-    auto it = g_states.find(sc);
-    if (it != g_states.end() && it->second) it->second->ReleaseBuffers();
+// Returns true if the swap chain is upscaling (then the real buffers are
+// resized to the window and the game's size goes to the proxies).
+bool OnResize(IDXGISwapChain* sc, UINT w, UINT h) {
+    SwapState* st = FindState(sc);
+    if (!st) return false;
+    st->ReleaseBuffers();
+    if (!st->Scaling()) return false;
+    DXGI_SWAP_CHAIN_DESC rd{};
+    FindVt(sc)->getDesc(sc, &rd);
+    st->OnGameResize(w, h, rd.OutputWindow);
+    return true;
+}
+
+HRESULT STDMETHODCALLTYPE HookGetBuffer(IDXGISwapChain* sc, UINT idx, REFIID riid, void** out) {
+    const VtHooks* vt = FindVt(sc);
+    if (!InHook() && G().cfg.fsrMode == 2 && G().ready) {
+        SwapState* st = StateFor(sc);
+        if (st && st->Scaling()) return st->GetProxy(sc, idx, riid, out);
+    }
+    return vt->getBuffer(sc, idx, riid, out);
+}
+
+HRESULT STDMETHODCALLTYPE HookGetDesc(IDXGISwapChain* sc, DXGI_SWAP_CHAIN_DESC* d) {
+    const HRESULT hr = FindVt(sc)->getDesc(sc, d);
+    if (SUCCEEDED(hr) && d && !InHook())
+        if (SwapState* st = FindState(sc)) st->AdjustSize(d->BufferDesc.Width, d->BufferDesc.Height);
+    return hr;
+}
+
+HRESULT STDMETHODCALLTYPE HookGetDesc1(IDXGISwapChain1* sc, DXGI_SWAP_CHAIN_DESC1* d) {
+    const HRESULT hr = FindVt(sc)->getDesc1(sc, d);
+    if (SUCCEEDED(hr) && d && !InHook())
+        if (SwapState* st = FindState(sc)) st->AdjustSize(d->Width, d->Height);
+    return hr;
 }
 
 HRESULT STDMETHODCALLTYPE HookPresent(IDXGISwapChain* sc, UINT sync, UINT flags) {
@@ -541,14 +762,14 @@ HRESULT STDMETHODCALLTYPE HookPresent1(IDXGISwapChain1* sc, UINT sync, UINT flag
 
 HRESULT STDMETHODCALLTYPE HookResizeBuffers(IDXGISwapChain* sc, UINT count, UINT w, UINT h,
                                             DXGI_FORMAT fmt, UINT flags) {
-    OnResize(sc);
+    if (OnResize(sc, w, h)) w = h = 0; // real buffers follow the window
     return FindVt(sc)->resize(sc, count, w, h, fmt, flags);
 }
 
 HRESULT STDMETHODCALLTYPE HookResizeBuffers1(IDXGISwapChain3* sc, UINT count, UINT w, UINT h,
                                              DXGI_FORMAT fmt, UINT flags, const UINT* mask,
                                              IUnknown* const* queues) {
-    OnResize(sc);
+    if (OnResize(sc, w, h)) w = h = 0;
     return FindVt(sc)->resize1(sc, count, w, h, fmt, flags, mask, queues);
 }
 
@@ -579,12 +800,18 @@ void HookSwapChain(IDXGISwapChain* sc) {
     h.vt = vt;
     h.present = reinterpret_cast<PresentFn>(vt[kSlotPresent]);
     h.resize = reinterpret_cast<ResizeBuffersFn>(vt[kSlotResizeBuffers]);
+    h.getBuffer = reinterpret_cast<GetBufferFn>(vt[kSlotGetBuffer]);
+    h.getDesc = reinterpret_cast<GetDescFn>(vt[kSlotGetDesc]);
+    if (has1) h.getDesc1 = reinterpret_cast<GetDesc1Fn>(vt[kSlotGetDesc1]);
     if (has1) h.present1 = reinterpret_cast<Present1Fn>(vt[kSlotPresent1]);
     if (has3) h.resize1 = reinterpret_cast<ResizeBuffers1Fn>(vt[kSlotResizeBuffers1]);
     g_vtCount = n + 1;
 
     WriteSlot(vt, kSlotPresent, reinterpret_cast<void*>(&HookPresent));
     WriteSlot(vt, kSlotResizeBuffers, reinterpret_cast<void*>(&HookResizeBuffers));
+    WriteSlot(vt, kSlotGetBuffer, reinterpret_cast<void*>(&HookGetBuffer));
+    WriteSlot(vt, kSlotGetDesc, reinterpret_cast<void*>(&HookGetDesc));
+    if (has1) WriteSlot(vt, kSlotGetDesc1, reinterpret_cast<void*>(&HookGetDesc1));
     if (has1) WriteSlot(vt, kSlotPresent1, reinterpret_cast<void*>(&HookPresent1));
     if (has3) WriteSlot(vt, kSlotResizeBuffers1, reinterpret_cast<void*>(&HookResizeBuffers1));
     Log("Hooked swap chain vtable %p (Present1: %s, ResizeBuffers1: %s)", static_cast<void*>(vt),

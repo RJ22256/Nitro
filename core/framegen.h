@@ -46,6 +46,8 @@ DXGI_FORMAT OutputFormatFor(DXGI_FORMAT backbuffer);
 bool IsHdrFormat(DXGI_FORMAT f);
 // Typed, non-sRGB view of a back buffer format (what Nitro's textures use).
 DXGI_FORMAT ViewFormat(DXGI_FORMAT f);
+// Typeless family of a back buffer format (for copies between views).
+DXGI_FORMAT TypelessFormat(DXGI_FORMAT f);
 
 class FrameGen {
 public:

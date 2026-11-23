@@ -16,16 +16,21 @@
 #include <imgui_impl_win32.h>
 
 #include <algorithm>
+#include <atomic>
 #include <cwchar>
 #include <cwctype>
 #include <fstream>
 #include <iterator>
+#include <mutex>
 #include <string>
+#include <thread>
 #include <vector>
 
 #include "../common/config.h"
+#include "../common/inject.h"
 #include "../common/shader_extract.h"
 #include "../core/nitro_ui.h"
+#include "library.h"
 
 extern IMGUI_IMPL_API LRESULT ImGui_ImplWin32_WndProcHandler(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam);
 
@@ -34,8 +39,12 @@ using namespace lsfgi;
 namespace {
 
 constexpr wchar_t kHookDll[] = L"NitroHook.dll";
+constexpr wchar_t kHookDll32[] = L"NitroHook32.dll";
 constexpr wchar_t kVkDll[] = L"NitroVk.dll";
+constexpr wchar_t kVkDll32[] = L"NitroVk32.dll";
 constexpr wchar_t kVkManifest[] = L"NitroVk.json";
+constexpr wchar_t kVkManifest32[] = L"NitroVk32.json";
+constexpr wchar_t kInjector32[] = L"NitroInject32.exe";
 constexpr wchar_t kBackupSuffix[] = L".nitro-backup";
 constexpr const wchar_t* kProxyNames[] = {L"dxgi.dll", L"d3d9.dll", L"version.dll"};
 constexpr wchar_t kVkLayersKey[] = L"Software\\Khronos\\Vulkan\\ImplicitLayers";
@@ -54,6 +63,9 @@ struct UiState {
     bool vsync = true;
     int hdr = 0; // 0 auto, 1 on, 2 off
     int api = 0; // 0 auto, 1 DXGI, 2 D3D9, 3 OpenGL, 4 Vulkan
+    int fsr = 0; // 0 off, 1 sharpen, 2 upscale
+    int sharpPct = 60;
+    int view = 0; // 0 game setup, 1 library
     std::string exeInfo = "Choose the game's .exe file.";
     std::string exeHint;
     std::string detected;
@@ -156,6 +168,7 @@ void LogErr(const std::wstring& line) { Log(line, nitro_ui::kBad); }
 struct ExeInfo {
     bool valid = false;
     bool x64 = false;
+    bool x86 = false;
     std::vector<std::string> imports;
 };
 
@@ -179,17 +192,25 @@ ExeInfo ReadExe(const std::wstring& path) {
         const auto* dos = reinterpret_cast<const IMAGE_DOS_HEADER*>(base);
         if (dos->e_magic != IMAGE_DOS_SIGNATURE) break;
         const size_t ntOff = static_cast<size_t>(dos->e_lfanew);
-        if (!in(ntOff, sizeof(IMAGE_NT_HEADERS64))) break;
-        const auto* nt = reinterpret_cast<const IMAGE_NT_HEADERS64*>(base + ntOff);
-        if (nt->Signature != IMAGE_NT_SIGNATURE) break;
+        if (!in(ntOff, sizeof(IMAGE_NT_HEADERS32))) break;
+        const auto* nt32 = reinterpret_cast<const IMAGE_NT_HEADERS32*>(base + ntOff);
+        if (nt32->Signature != IMAGE_NT_SIGNATURE) break;
         info.valid = true;
-        info.x64 = nt->FileHeader.Machine == IMAGE_FILE_MACHINE_AMD64 &&
-                   nt->OptionalHeader.Magic == IMAGE_NT_OPTIONAL_HDR64_MAGIC;
-        if (!info.x64) break;
+        info.x64 = nt32->FileHeader.Machine == IMAGE_FILE_MACHINE_AMD64 &&
+                   nt32->OptionalHeader.Magic == IMAGE_NT_OPTIONAL_HDR64_MAGIC;
+        info.x86 = nt32->FileHeader.Machine == IMAGE_FILE_MACHINE_I386 &&
+                   nt32->OptionalHeader.Magic == IMAGE_NT_OPTIONAL_HDR32_MAGIC;
+        if (!info.x64 && !info.x86) break;
+        if (info.x64 && !in(ntOff, sizeof(IMAGE_NT_HEADERS64))) break;
+        const auto* nt64 = reinterpret_cast<const IMAGE_NT_HEADERS64*>(base + ntOff);
+        // Same layout up to the optional header; the data directories differ.
+        const IMAGE_DATA_DIRECTORY* dirs =
+            info.x64 ? nt64->OptionalHeader.DataDirectory : nt32->OptionalHeader.DataDirectory;
+        const uint64_t imageBase = info.x64 ? nt64->OptionalHeader.ImageBase : nt32->OptionalHeader.ImageBase;
 
-        const auto* sections = IMAGE_FIRST_SECTION(nt);
+        const auto* sections = info.x64 ? IMAGE_FIRST_SECTION(nt64) : IMAGE_FIRST_SECTION(nt32);
         const size_t secOff = reinterpret_cast<const uint8_t*>(sections) - base;
-        const WORD nsec = nt->FileHeader.NumberOfSections;
+        const WORD nsec = nt32->FileHeader.NumberOfSections;
         if (!in(secOff, nsec * sizeof(IMAGE_SECTION_HEADER))) break;
         auto rvaToOff = [&](DWORD rva) -> size_t {
             for (WORD i = 0; i < nsec; ++i) {
@@ -209,7 +230,7 @@ ExeInfo ReadExe(const std::wstring& path) {
             return s;
         };
 
-        const auto& dirs = nt->OptionalHeader.DataDirectory;
+
         const DWORD impRva = dirs[IMAGE_DIRECTORY_ENTRY_IMPORT].VirtualAddress;
         if (impRva) {
             size_t off = rvaToOff(impRva);
@@ -228,7 +249,7 @@ ExeInfo ReadExe(const std::wstring& path) {
                 if (!d->DllNameRVA) break;
                 DWORD nameRva = d->DllNameRVA;
                 if (!(d->Attributes.AllAttributes & 1))
-                    nameRva = static_cast<DWORD>(nameRva - nt->OptionalHeader.ImageBase);
+                    nameRva = static_cast<DWORD>(nameRva - imageBase);
                 info.imports.push_back(readName(nameRva));
                 off += sizeof(IMAGE_DELAYLOAD_DESCRIPTOR);
             }
@@ -340,13 +361,10 @@ void AnalyzeGame() {
         ui.exeInfo = "This doesn't look like a Windows program.";
         return;
     }
-    if (!info.x64) {
-        ui.exeInfo = "32-bit game: not supported (64-bit games only).";
-        return;
-    }
+
     std::wstring label;
     DetectApi(exe, label);
-    ui.exeInfo = "64-bit game";
+    ui.exeInfo = info.x64 ? "64-bit game" : "32-bit game";
     ui.detected = U(label);
     const std::wstring shipping = FindShippingExe(Parent(exe));
     if (!shipping.empty() && _wcsicmp(shipping.c_str(), exe.c_str()) != 0)
@@ -499,6 +517,8 @@ Config ConfigFromUi() {
     c.dynamic = ui.dynamic;
     c.vsyncPacing = ui.vsync;
     c.hdr = ui.hdr == 1 ? 1 : (ui.hdr == 2 ? 0 : -1);
+    c.fsrMode = ui.fsr;
+    c.fsrSharpness = static_cast<float>(ui.sharpPct) / 100.0f;
     c.api = L"auto";
     return c;
 }
@@ -508,6 +528,7 @@ void SaveUi() {
     WritePrivateProfileStringW(L"Launcher", L"GameExe", Trim(W(ui.exe)).c_str(), IniPath().c_str());
     WritePrivateProfileStringW(L"Launcher", L"Arguments", W(ui.args).c_str(), IniPath().c_str());
     WritePrivateProfileStringW(L"Launcher", L"ApiChoice", std::to_wstring(ui.api).c_str(), IniPath().c_str());
+    WritePrivateProfileStringW(L"Launcher", L"View", std::to_wstring(ui.view).c_str(), IniPath().c_str());
 }
 
 void LoadUi() {
@@ -526,6 +547,9 @@ void LoadUi() {
     ui.dynamic = c.dynamic;
     ui.vsync = c.vsyncPacing;
     ui.hdr = c.hdr < 0 ? 0 : (c.hdr ? 1 : 2);
+    ui.fsr = c.fsrMode;
+    ui.sharpPct = static_cast<int>(c.fsrSharpness * 100.0f + 0.5f);
+    ui.view = static_cast<int>(GetPrivateProfileIntW(L"Launcher", L"View", 0, IniPath().c_str())) == 1 ? 1 : 0;
 }
 
 // ---------------------------------------------------------------------------
@@ -539,6 +563,21 @@ bool IsOurDll(const std::wstring& path) {
     return std::search(data.begin(), data.end(), kMarker, kMarker + len) != data.end();
 }
 
+// Anti-cheat folders sit next to the exe or, for Unreal games, at the game root
+// above <Project>\Binaries\Win64.
+std::wstring GameRoot(const std::wstring& exe) {
+    std::wstring dir = Parent(exe);
+    std::wstring l = dir;
+    std::transform(l.begin(), l.end(), l.begin(), ::towlower);
+    const size_t b = l.rfind(L"\\binaries\\");
+    if (b != std::wstring::npos) dir = Parent(dir.substr(0, b));
+    return dir;
+}
+
+bool GameHasAntiCheat(const std::wstring& exe) {
+    return nitro_lib::HasAntiCheat(GameRoot(exe), exe);
+}
+
 bool Preflight(std::wstring& exe, Api& api) {
     exe = Trim(W(ui.exe));
     if (exe.empty() || !FileExists(exe)) {
@@ -546,8 +585,13 @@ bool Preflight(std::wstring& exe, Api& api) {
         return false;
     }
     const ExeInfo info = ReadExe(exe);
-    if (!info.valid || !info.x64) {
-        LogErr(L"Only 64-bit games are supported.");
+    if (!info.valid || (!info.x64 && !info.x86)) {
+        LogErr(L"That doesn't look like a Windows game executable.");
+        return false;
+    }
+    if (GameHasAntiCheat(exe)) {
+        LogErr(L"This game ships with anti-cheat (EasyAntiCheat, BattlEye, ...). Nitro won't inject into it: "
+               L"anti-cheat can treat injected DLLs as cheating and ban the account.");
         return false;
     }
     CheckLossless();
@@ -557,13 +601,18 @@ bool Preflight(std::wstring& exe, Api& api) {
         return false;
     }
     api = ChosenApi(exe);
-    const wchar_t* need = api == Api::Vulkan ? kVkDll : kHookDll;
+    const bool is32 = info.x86;
+    const wchar_t* need = api == Api::Vulkan ? (is32 ? kVkDll32 : kVkDll) : (is32 ? kHookDll32 : kHookDll);
     if (!FileExists(g_dir + L"\\" + need)) {
         Log(std::wstring(need) + L" is missing from the Nitro folder.");
         return false;
     }
-    if (api == Api::Vulkan && !FileExists(g_dir + L"\\" + kVkManifest)) {
-        Log(std::wstring(kVkManifest) + L" is missing from the Nitro folder.");
+    if (api == Api::Vulkan && !FileExists(g_dir + L"\\" + (is32 ? kVkManifest32 : kVkManifest))) {
+        Log(std::wstring(is32 ? kVkManifest32 : kVkManifest) + L" is missing from the Nitro folder.");
+        return false;
+    }
+    if (is32 && api != Api::Vulkan && !FileExists(g_dir + L"\\" + kInjector32)) {
+        Log(std::wstring(kInjector32) + L" is missing from the Nitro folder.");
         return false;
     }
     return true;
@@ -574,20 +623,27 @@ std::wstring Lower(std::wstring s) {
     return s;
 }
 
-std::wstring ManifestPath() {
+std::wstring ManifestPath(const wchar_t* name = kVkManifest) {
     wchar_t full[MAX_PATH];
-    GetFullPathNameW((g_dir + L"\\" + kVkManifest).c_str(), MAX_PATH, full, nullptr);
+    GetFullPathNameW((g_dir + L"\\" + name).c_str(), MAX_PATH, full, nullptr);
     return full;
 }
 
+// Registers the 64-bit and (if present) 32-bit layer; each loader only loads
+// the one matching its own bitness.
 bool RegisterVulkanLayer() {
     HKEY key = nullptr;
     if (RegCreateKeyExW(HKEY_CURRENT_USER, kVkLayersKey, 0, nullptr, 0, KEY_SET_VALUE, nullptr, &key, nullptr) !=
         ERROR_SUCCESS)
         return false;
     const DWORD zero = 0;
-    const LONG r = RegSetValueExW(key, ManifestPath().c_str(), 0, REG_DWORD, reinterpret_cast<const BYTE*>(&zero),
-                                  sizeof(zero));
+    LONG r = ERROR_SUCCESS;
+    for (const wchar_t* m : {kVkManifest, kVkManifest32}) {
+        if (!FileExists(g_dir + L"\\" + m)) continue;
+        const LONG e = RegSetValueExW(key, ManifestPath(m).c_str(), 0, REG_DWORD,
+                                      reinterpret_cast<const BYTE*>(&zero), sizeof(zero));
+        if (e != ERROR_SUCCESS) r = e;
+    }
     RegCloseKey(key);
     return r == ERROR_SUCCESS;
 }
@@ -600,7 +656,8 @@ bool AnyVulkanGames() {
 
 void UnregisterVulkanLayerIfUnused() {
     if (AnyVulkanGames()) return;
-    RegDeleteKeyValueW(HKEY_CURRENT_USER, kVkLayersKey, ManifestPath().c_str());
+    RegDeleteKeyValueW(HKEY_CURRENT_USER, kVkLayersKey, ManifestPath(kVkManifest).c_str());
+    RegDeleteKeyValueW(HKEY_CURRENT_USER, kVkLayersKey, ManifestPath(kVkManifest32).c_str());
 }
 
 // Which system DLL name the hook should stand in for in this game's folder.
@@ -685,7 +742,8 @@ void Install() {
         Log(L"The game already had a " + std::wstring(proxy) + L" (another mod?). Renamed it to " + proxy +
             kBackupSuffix + L"; Remove puts it back.");
     }
-    if (!CopyFileW((g_dir + L"\\" + kHookDll).c_str(), dst.c_str(), FALSE)) {
+    const bool is32 = ReadExe(exe).x86;
+    if (!CopyFileW((g_dir + L"\\" + (is32 ? kHookDll32 : kHookDll)).c_str(), dst.c_str(), FALSE)) {
         const DWORD e = GetLastError();
         LogErr(L"Copy failed: " + ErrorText(e));
         if (e == ERROR_ACCESS_DENIED) Log(L"Try running Nitro as administrator.");
@@ -721,28 +779,6 @@ void Uninstall() {
     DeleteFileW((gameDir + L"\\" + kConfigFileName).c_str());
     DeleteFileW((gameDir + L"\\Nitro.log").c_str());
     if (changed) LogOk(L"Removed Nitro from " + gameDir); else Log(L"Nothing to remove for " + gameDir);
-}
-
-HMODULE FindRemoteModule(HANDLE process, const std::wstring& path) {
-    HMODULE mods[1024];
-    DWORD needed = 0;
-    if (!EnumProcessModulesEx(process, mods, sizeof(mods), &needed, LIST_MODULES_64BIT)) return nullptr;
-    const DWORD count = std::min<DWORD>(needed / sizeof(HMODULE), 1024);
-    for (DWORD i = 0; i < count; ++i) {
-        wchar_t name[MAX_PATH];
-        if (GetModuleFileNameExW(process, mods[i], name, MAX_PATH) && _wcsicmp(name, path.c_str()) == 0)
-            return mods[i];
-    }
-    return nullptr;
-}
-
-bool RunRemote(HANDLE process, LPTHREAD_START_ROUTINE fn, void* arg, DWORD& exitCode) {
-    HANDLE t = CreateRemoteThread(process, nullptr, 0, fn, arg, 0, nullptr);
-    if (!t) return false;
-    const DWORD wait = WaitForSingleObject(t, 30000);
-    GetExitCodeThread(t, &exitCode);
-    CloseHandle(t);
-    return wait == WAIT_OBJECT_0;
 }
 
 void Launch() {
@@ -784,54 +820,49 @@ void Launch() {
         SaveConfig(IniPath(), c);
     }
 
-    wchar_t full[MAX_PATH];
-    GetFullPathNameW((g_dir + L"\\" + kHookDll).c_str(), MAX_PATH, full, nullptr);
-    const std::wstring dll = full;
-
-    // Offset of Nitro_InitHooks inside the hook DLL (same in every process).
-    HMODULE local = LoadLibraryExW(dll.c_str(), nullptr, DONT_RESOLVE_DLL_REFERENCES);
-    const auto* initProc = local ? reinterpret_cast<const uint8_t*>(GetProcAddress(local, "Nitro_InitHooks")) : nullptr;
-    const size_t initRva = initProc ? static_cast<size_t>(initProc - reinterpret_cast<const uint8_t*>(local)) : 0;
-    if (local) FreeLibrary(local);
-    if (!initRva) {
-        Log(L"Could not read " + std::wstring(kHookDll) + L".");
-        return;
-    }
-
-    if (!CreateProcessW(exe.c_str(), cmd.data(), nullptr, nullptr, FALSE, CREATE_SUSPENDED, nullptr,
-                        workDir.c_str(), &si, &pi)) {
-        const DWORD e = GetLastError();
-        Log(L"Could not start the game: " + ErrorText(e));
-        if (e == ERROR_ELEVATION_REQUIRED) Log(L"The game needs admin rights - run Nitro as administrator.");
-        return;
-    }
-
-    bool ok = false;
-    const size_t bytes = (dll.size() + 1) * sizeof(wchar_t);
-    void* remote = VirtualAllocEx(pi.hProcess, nullptr, bytes, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
-    if (remote && WriteProcessMemory(pi.hProcess, remote, dll.c_str(), bytes, nullptr)) {
-        auto loadLibrary = reinterpret_cast<LPTHREAD_START_ROUTINE>(
-            GetProcAddress(GetModuleHandleW(L"kernel32.dll"), "LoadLibraryW"));
-        DWORD code = 0;
-        if (RunRemote(pi.hProcess, loadLibrary, remote, code) && code != 0) {
-            if (HMODULE mod = FindRemoteModule(pi.hProcess, dll)) {
-                auto init = reinterpret_cast<LPTHREAD_START_ROUTINE>(reinterpret_cast<uint8_t*>(mod) + initRva);
-                ok = RunRemote(pi.hProcess, init, nullptr, code);
-            }
+    bool injected = false;
+    if (ReadExe(exe).x86) {
+        // 32-bit game: the 32-bit helper does the injection.
+        const std::wstring helperCmd = L"\"" + g_dir + L"\\" + kInjector32 + L"\" \"" + exe + L"\" \"" + g_dir +
+                                       L"\\" + kHookDll32 + L"\"";
+        SetEnvironmentVariableW(L"NITRO_ARGS", args.c_str());
+        STARTUPINFOW hsi{};
+        hsi.cb = sizeof(hsi);
+        PROCESS_INFORMATION hpi{};
+        std::wstring mutableCmd = helperCmd;
+        const BOOL ok = CreateProcessW(nullptr, mutableCmd.data(), nullptr, nullptr, FALSE, 0, nullptr,
+                                       g_dir.c_str(), &hsi, &hpi);
+        SetEnvironmentVariableW(L"NITRO_ARGS", nullptr);
+        if (!ok) {
+            LogErr(L"Could not start " + std::wstring(kInjector32) + L": " + ErrorText(GetLastError()));
+            return;
         }
+        WaitForSingleObject(hpi.hProcess, 60000);
+        DWORD code = kInjectNotStarted;
+        GetExitCodeProcess(hpi.hProcess, &code);
+        CloseHandle(hpi.hThread);
+        CloseHandle(hpi.hProcess);
+        if (code == kInjectNotStarted) {
+            LogErr(L"Could not start the game (it may need admin rights).");
+            return;
+        }
+        injected = code == kInjectOk;
+    } else {
+        const LaunchResult r = LaunchInjected(exe, args, g_dir + L"\\" + kHookDll);
+        if (!r.started) {
+            LogErr(L"Could not start the game: " + ErrorText(r.error));
+            if (r.error == ERROR_ELEVATION_REQUIRED) Log(L"The game needs admin rights - run Nitro as administrator.");
+            return;
+        }
+        injected = r.injected;
     }
-    if (remote) VirtualFreeEx(pi.hProcess, remote, 0, MEM_RELEASE);
 
-    ResumeThread(pi.hThread);
-    CloseHandle(pi.hThread);
-    CloseHandle(pi.hProcess);
-
-    if (ok) {
+    if (injected) {
         LogOk(std::wstring(L"Game started with Nitro (") + ApiName(api) + L"). Log: " + g_dir + L"\\Nitro.log");
-        Log(L"If the game restarts itself through Steam, use 'Install into game folder' instead.");
+        Log(L"If the game restarts itself through Steam, use 'Install into game' instead.");
     } else {
         LogErr(L"Game started, but injection failed (anti-cheat or permissions?). "
-            L"Try 'Install into game folder' instead.");
+               L"Try 'Install into game' instead.");
     }
 }
 
@@ -954,6 +985,327 @@ void StepDots(int step) {
         dl->AddCircleFilled(ImVec2(p.x + gap * static_cast<float>(i), p.y + r), i == step ? r * 1.25f : r,
                             i == step ? nitro_ui::kCyan : IM_COL32(52, 60, 110, 255));
     ImGui::Dummy(ImVec2(0, r * 2 + 4 * s));
+}
+
+// ---------------------------------------------------------------------------
+// Game library
+
+struct Library {
+    std::mutex mu;
+    std::vector<nitro_lib::Game> games;
+    std::thread worker;
+    std::atomic<bool> stop{false};
+    std::atomic<bool> scanning{false};
+    bool loaded = false;
+    char search[128] = {};
+} lib;
+
+std::wstring SteamRoot() {
+    for (const std::wstring& p : {RegString(HKEY_CURRENT_USER, L"Software\\Valve\\Steam", L"SteamPath"),
+                                  RegString(HKEY_LOCAL_MACHINE, L"SOFTWARE\\WOW6432Node\\Valve\\Steam", L"InstallPath")})
+        if (!p.empty() && DirExists(p)) return p;
+    return {};
+}
+
+// "Installed" when a Nitro proxy sits next to the exe, "Vulkan on" when the
+// Vulkan layer is switched on for it.
+std::string NitroStatus(const std::wstring& exe) {
+    if (exe.empty()) return {};
+    const std::wstring dir = Parent(exe);
+    for (const wchar_t* name : kProxyNames)
+        if (FileExists(dir + L"\\" + name) && IsOurDll(dir + L"\\" + name)) return "Installed";
+    wchar_t flag[8] = {};
+    if (GetPrivateProfileStringW(L"VulkanGames", Lower(exe).c_str(), L"", flag, 8, IniPath().c_str()) > 0)
+        return "Vulkan on";
+    return {};
+}
+
+void StopLibraryWorker() {
+    lib.stop = true;
+    if (lib.worker.joinable()) lib.worker.join();
+    lib.stop = false;
+}
+
+void RefreshLibrary() {
+    if (lib.scanning) return;
+    StopLibraryWorker();
+    {
+        std::lock_guard<std::mutex> lock(lib.mu);
+        for (auto& g : lib.games)
+            if (g.coverSrv) g.coverSrv->Release();
+        lib.games.clear();
+    }
+    lib.loaded = true;
+    lib.scanning = true;
+    lib.worker = std::thread([] {
+        const std::wstring root = SteamRoot();
+        std::vector<nitro_lib::Game> found = nitro_lib::FindGames(SteamLibraries(), root);
+        {
+            std::lock_guard<std::mutex> lock(lib.mu);
+            lib.games = found;
+        }
+        // Slower per-game analysis; results show up as they finish.
+        for (size_t i = 0; i < found.size() && !lib.stop; ++i) {
+            nitro_lib::Game g = found[i];
+            if (g.exe.empty()) g.exe = nitro_lib::GuessMainExe(g.folder, g.name);
+            if (!g.exe.empty()) {
+                const std::wstring shipping = FindShippingExe(Parent(g.exe));
+                if (!shipping.empty()) g.exe = shipping;
+            }
+            const bool antiCheat = nitro_lib::HasAntiCheat(g.folder, g.exe);
+            std::string api, status;
+            bool x86 = false;
+            if (!g.exe.empty()) {
+                x86 = ReadExe(g.exe).x86;
+                std::wstring label;
+                if (DetectApi(g.exe, label) != Api::Unknown) api = U(label);
+                status = NitroStatus(g.exe);
+            }
+            std::lock_guard<std::mutex> lock(lib.mu);
+            if (i < lib.games.size() && lib.games[i].folder == g.folder) {
+                auto& dst = lib.games[i];
+                dst.exe = g.exe;
+                dst.antiCheat = antiCheat;
+                dst.x86 = x86;
+                dst.api = api;
+                dst.status = status;
+                dst.analysed = true;
+            }
+        }
+        lib.scanning = false;
+    });
+}
+
+void SelectGame(const nitro_lib::Game& g) {
+    CopyTo(ui.exe, sizeof(ui.exe), U(g.exe));
+    AnalyzeGame();
+    ui.view = 0;
+    SaveUi();
+    Log(L"Selected " + g.name + L".");
+    if (g.antiCheat)
+        Log(L"Heads up: " + g.name + L" ships with anti-cheat, so Nitro won't install into it.", nitro_ui::kWarn);
+}
+
+bool MatchesSearch(const nitro_lib::Game& g) {
+    if (!lib.search[0]) return true;
+    std::string n = U(g.name), q = lib.search;
+    std::transform(n.begin(), n.end(), n.begin(), [](unsigned char c) { return static_cast<char>(tolower(c)); });
+    std::transform(q.begin(), q.end(), q.begin(), [](unsigned char c) { return static_cast<char>(tolower(c)); });
+    return n.find(q) != std::string::npos;
+}
+
+// Two-letter monogram for games without cover art.
+std::string Monogram(const std::wstring& name) {
+    std::string out;
+    bool start = true;
+    for (wchar_t c : name) {
+        if (iswalnum(c) && c < 128) {
+            if (start && out.size() < 2) out.push_back(static_cast<char>(towupper(c)));
+            start = false;
+        } else if (c == L' ' || c == L':' || c == L'-') {
+            start = true;
+        }
+    }
+    return out.empty() ? "?" : out;
+}
+
+ImU32 TileHue(const std::wstring& name, float v) {
+    unsigned h = 2166136261u;
+    for (wchar_t c : name) h = (h ^ static_cast<unsigned>(c)) * 16777619u;
+    const float hue = static_cast<float>(h % 360) / 360.0f;
+    float r, g, b;
+    ImGui::ColorConvertHSVtoRGB(hue, 0.55f, v, r, g, b);
+    return ImGui::ColorConvertFloat4ToU32(ImVec4(r, g, b, 1.0f));
+}
+
+void DrawBadge(ImDrawList* dl, ImVec2 pos, const char* text, ImVec4 color) {
+    const float s = g_scale;
+    ImGui::PushFont(g_fonts.caption);
+    const ImVec2 ts = ImGui::CalcTextSize(text);
+    const ImVec2 q(pos.x + ts.x + 14 * s, pos.y + ts.y + 6 * s);
+    dl->AddRectFilled(pos, q, IM_COL32(10, 12, 30, 225), 6 * s);
+    dl->AddRect(pos, q, ImGui::ColorConvertFloat4ToU32(ImVec4(color.x, color.y, color.z, 0.8f)), 6 * s);
+    dl->AddText(ImVec2(pos.x + 7 * s, pos.y + 3 * s), ImGui::ColorConvertFloat4ToU32(color), text);
+    ImGui::PopFont();
+}
+
+void DrawGameTile(nitro_lib::Game& g, float w, bool& refreshStatus) {
+    const float s = g_scale;
+    const float coverH = w * 1.5f;
+    ImGui::PushID(static_cast<const void*>(&g));
+    ImGui::BeginGroup();
+    const ImVec2 p = ImGui::GetCursorScreenPos();
+    ImGui::SetNextItemAllowOverlap();
+    const bool clicked = ImGui::InvisibleButton("##tile", ImVec2(w, coverH));
+    const bool hovered = ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenOverlappedByItem);
+    ImDrawList* dl = ImGui::GetWindowDrawList();
+    const ImVec2 q(p.x + w, p.y + coverH);
+    const float r = 10 * s;
+
+    if (!g.coverTried && !g.cover.empty()) {
+        g.coverTried = true;
+        g.coverSrv = nitro_lib::LoadCover(g_device.Get(), g.cover, static_cast<UINT>(w * 1.5f));
+    }
+    if (g.coverSrv) {
+        dl->AddImageRounded((ImTextureID)(intptr_t)g.coverSrv, p, q, ImVec2(0, 0), ImVec2(1, 1),
+                            g.antiCheat ? IM_COL32(255, 255, 255, 110) : IM_COL32_WHITE, r);
+    } else {
+        const int v0 = dl->VtxBuffer.Size;
+        dl->AddRectFilled(p, q, IM_COL32_WHITE, r);
+        ImGui::ShadeVertsLinearColorGradientKeepAlpha(dl, v0, dl->VtxBuffer.Size, p, q, TileHue(g.name, 0.62f),
+                                                      TileHue(g.name, 0.20f));
+        const std::string mono = Monogram(g.name);
+        ImGui::PushFont(g_fonts.title);
+        const ImVec2 ts = ImGui::CalcTextSize(mono.c_str());
+        dl->AddText(ImVec2(p.x + (w - ts.x) * 0.5f, p.y + (coverH - ts.y) * 0.5f),
+                    IM_COL32(255, 255, 255, g.antiCheat ? 110 : 235), mono.c_str());
+        ImGui::PopFont();
+    }
+    if (hovered) dl->AddRect(p, q, nitro_ui::kCyan, r, 0, 2.5f * s);
+
+    // Badges
+    if (g.antiCheat)
+        DrawBadge(dl, ImVec2(p.x + 8 * s, p.y + 8 * s), "Anti-cheat", nitro_ui::kBad);
+    else if (!g.status.empty())
+        DrawBadge(dl, ImVec2(p.x + 8 * s, p.y + 8 * s), g.status.c_str(), nitro_ui::kGood);
+    if (g.analysed && g.x86) {
+        ImGui::PushFont(g_fonts.caption);
+        const float bw = ImGui::CalcTextSize("32-bit").x + 14 * s;
+        ImGui::PopFont();
+        DrawBadge(dl, ImVec2(q.x - bw - 8 * s, p.y + 8 * s), "32-bit", nitro_ui::kMuted);
+    }
+
+    // Hover actions
+    if (hovered && g.analysed && !g.exe.empty() && !g.antiCheat) {
+        const float bh = 30 * s;
+        const float bw = w - 16 * s;
+        ImGui::SetCursorScreenPos(ImVec2(p.x + 8 * s, q.y - bh - 8 * s));
+        const bool installed = !g.status.empty();
+        if (installed ? nitro_ui::GhostButton("Remove", ImVec2(bw, bh))
+                      : nitro_ui::AccentButton("Install", ImVec2(bw, bh))) {
+            CopyTo(ui.exe, sizeof(ui.exe), U(g.exe));
+            AnalyzeGame();
+            if (installed) Uninstall(); else Install();
+            refreshStatus = true;
+        }
+    }
+    ImGui::SetCursorScreenPos(ImVec2(p.x, q.y + 6 * s));
+
+    // Name + details
+    {
+        const std::string name = U(g.name);
+        const ImVec2 np = ImGui::GetCursorScreenPos();
+        const float lh = ImGui::GetTextLineHeight();
+        ImGui::RenderTextEllipsis(dl, np, ImVec2(np.x + w, np.y + lh), np.x + w, np.x + w, name.c_str(), nullptr,
+                                  nullptr);
+        ImGui::Dummy(ImVec2(w, lh));
+        if (ImGui::IsItemHovered() && ImGui::CalcTextSize(name.c_str()).x > w) ImGui::SetTooltip("%s", name.c_str());
+        ImGui::PushFont(g_fonts.caption);
+        std::string detail = nitro_lib::StoreName(g.store);
+        if (!g.analysed)
+            detail += " \xC2\xB7 checking...";
+        else if (g.exe.empty())
+            detail += " \xC2\xB7 exe not found";
+        else if (!g.api.empty())
+            detail += " \xC2\xB7 " + g.api;
+        const ImVec2 dp = ImGui::GetCursorScreenPos();
+        ImGui::RenderTextEllipsis(dl, dp, ImVec2(dp.x + w, dp.y + ImGui::GetTextLineHeight()), dp.x + w, dp.x + w,
+                                  detail.c_str(), nullptr, nullptr);
+        ImGui::Dummy(ImVec2(w, ImGui::GetTextLineHeight()));
+        ImGui::PopFont();
+    }
+    ImGui::EndGroup();
+    if (clicked && g.analysed) {
+        if (g.exe.empty())
+            Log(L"Couldn't find the exe for " + g.name + L" - pick it with Browse on the Game tab.", nitro_ui::kWarn);
+        else
+            SelectGame(g);
+    }
+    if (hovered && !clicked) {
+        if (g.antiCheat)
+            ImGui::SetTooltip("Anti-cheat detected - Nitro won't touch this game.");
+        else if (g.analysed && !g.exe.empty())
+            ImGui::SetTooltip("Click to set up \xC2\xB7 %s", U(g.exe).c_str());
+    }
+    ImGui::PopID();
+}
+
+void DrawLibrary(float height) {
+    const float s = g_scale;
+    if (!lib.loaded) RefreshLibrary();
+    if (!BeginCard("##library", ImVec2(ImGui::GetContentRegionAvail().x, height))) {
+        ImGui::EndChild();
+        return;
+    }
+    std::lock_guard<std::mutex> lock(lib.mu);
+
+    // Toolbar
+    int steam = 0, epic = 0, gog = 0;
+    for (const auto& g : lib.games)
+        (g.store == nitro_lib::Store::Steam ? steam : g.store == nitro_lib::Store::Epic ? epic : gog)++;
+    CardTitle("Your games");
+    ImGui::SameLine();
+    {
+        char counts[96];
+        snprintf(counts, sizeof(counts), "%d Steam \xC2\xB7 %d Epic \xC2\xB7 %d GOG%s", steam, epic, gog,
+                 lib.scanning ? " \xC2\xB7 scanning..." : "");
+        nitro_ui::Chip(counts, lib.scanning ? nitro_ui::kWarn : nitro_ui::kMuted);
+    }
+    {
+        const float rw = 100 * s, sw = 260 * s;
+        nitro_ui::SameLineRight(sw + rw + ImGui::GetStyle().ItemSpacing.x);
+        ImGui::SetNextItemWidth(sw);
+        ImGui::InputTextWithHint("##search", "Search games", lib.search, sizeof(lib.search));
+        ImGui::SameLine();
+        ImGui::BeginDisabled(lib.scanning);
+        const bool refresh = nitro_ui::GhostButton("Refresh", ImVec2(rw, 0));
+        ImGui::EndDisabled();
+        if (refresh) {
+            ImGui::EndChild();
+            // RefreshLibrary takes the lock itself
+            lib.mu.unlock();
+            RefreshLibrary();
+            lib.mu.lock();
+            return;
+        }
+    }
+    ImGui::Spacing();
+
+    // Grid
+    ImGui::BeginChild("##grid", ImVec2(0, 0), ImGuiChildFlags_None, ImGuiWindowFlags_NoBackground);
+    const float spacing = 16 * s;
+    const float availW = ImGui::GetContentRegionAvail().x;
+    const int cols = (std::max)(1, static_cast<int>((availW + spacing) / (150 * s + spacing)));
+    const float tileW = (availW - spacing * static_cast<float>(cols - 1)) / static_cast<float>(cols);
+    int shown = 0;
+    bool refreshStatus = false;
+    nitro_lib::Game* changedGame = nullptr;
+    for (auto& g : lib.games) {
+        if (!MatchesSearch(g)) continue;
+        if (shown % cols) ImGui::SameLine(0, spacing);
+        else if (shown) ImGui::Dummy(ImVec2(0, 8 * s));
+        bool r = false;
+        DrawGameTile(g, tileW, r);
+        if (r) {
+            refreshStatus = true;
+            changedGame = &g;
+        }
+        ++shown;
+    }
+    if (refreshStatus && changedGame) changedGame->status = NitroStatus(changedGame->exe);
+    if (!shown) {
+        ImGui::Dummy(ImVec2(0, 30 * s));
+        if (lib.scanning)
+            CenteredText("Looking for games...", nitro_ui::kMuted, availW);
+        else if (lib.games.empty())
+            CenteredText("No games found. Nitro looks in Steam, Epic Games and GOG Galaxy. For anything else, "
+                         "use Browse on the Game tab.",
+                         nitro_ui::kMuted, availW * 0.7f);
+        else
+            CenteredText("No games match your search.", nitro_ui::kMuted, availW);
+    }
+    ImGui::EndChild();
+    ImGui::EndChild();
 }
 
 void DrawSetup() {
@@ -1107,6 +1459,31 @@ void DrawSetup() {
     ImGui::End();
 }
 
+void DrawLog(float height) {
+    if (BeginCard("##log", ImVec2(ImGui::GetContentRegionAvail().x, height))) {
+        ImGui::PushFont(g_fonts.caption);
+        for (const auto& [color, line] : ui.log) {
+            ImGui::PushTextWrapPos(0);
+            ImGui::TextColored(color, "%s", line.c_str());
+            ImGui::PopTextWrapPos();
+        }
+        if (ui.scrollLog) {
+            ImGui::SetScrollHereY(1.0f);
+            ui.scrollLog = false;
+        }
+        ImGui::PopFont();
+    }
+    ImGui::EndChild();
+}
+
+void DrawFooter() {
+    ImGui::PushFont(g_fonts.caption);
+    ImGui::TextColored(nitro_ui::kMuted,
+                       "Single-player games only \xC2\xB7 Not affiliated with Lossless Scaling or AMD \xC2\xB7 "
+                       "Logs: Nitro.log / NitroVk.log");
+    ImGui::PopFont();
+}
+
 void DrawUi() {
     const float s = g_scale;
     if (wiz.active) {
@@ -1120,7 +1497,8 @@ void DrawUi() {
     ImGui::PushStyleVar(ImGuiStyleVar_WindowBorderSize, 0.0f);
     ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(24 * s, 20 * s));
     ImGui::Begin("##main", nullptr,
-                 ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoSavedSettings |
+                 ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoCollapse |
+                     ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoSavedSettings |
                      ImGuiWindowFlags_NoBringToFrontOnFocus);
     ImGui::PopStyleVar(3);
     bool changed = false;
@@ -1142,11 +1520,40 @@ void DrawUi() {
         }
         ImGui::PopFont();
         ImGui::EndGroup();
+
+        // Game / Library switch
+        ImGui::SameLine();
+        const float pw = 104 * s, ph = ImGui::GetFrameHeight() * 1.1f;
+        nitro_ui::SameLineRight(pw * 2 + 8 * s);
+        ImGui::BeginGroup();
+        ImGui::Dummy(ImVec2(0, (logo - ph) * 0.5f));
+        if (nitro_ui::Pill("Game", ui.view == 0, ImVec2(pw, ph)) && ui.view != 0) {
+            ui.view = 0;
+            changed = true;
+        }
+        ImGui::SameLine(0, 8 * s);
+        if (nitro_ui::Pill("Library", ui.view == 1, ImVec2(pw, ph)) && ui.view != 1) {
+            ui.view = 1;
+            changed = true;
+        }
+        ImGui::EndGroup();
     }
     ImGui::Spacing();
 
     const float avail = ImGui::GetContentRegionAvail().x;
     const float gap = ImGui::GetStyle().ItemSpacing.x * 1.5f;
+    const float footer = ImGui::GetTextLineHeightWithSpacing() + 4 * s;
+
+    if (ui.view == 1) {
+        const float logH = 120 * s;
+        DrawLibrary((std::max)(300 * s, ImGui::GetContentRegionAvail().y - logH - footer -
+                                            ImGui::GetStyle().ItemSpacing.y));
+        DrawLog(logH);
+        DrawFooter();
+        if (changed) SaveUi();
+        ImGui::End();
+        return;
+    }
 
     // ---- Game card
     if (BeginCard("##game", ImVec2(avail, 0))) {
@@ -1161,7 +1568,7 @@ void DrawUi() {
         ImGui::SameLine();
         if (nitro_ui::GhostButton("Browse...", ImVec2(bw, 0))) Browse();
 
-        const bool good = ui.exeInfo == "64-bit game";
+        const bool good = ui.exeInfo == "64-bit game" || ui.exeInfo == "32-bit game";
         nitro_ui::Chip(ui.exeInfo.c_str(), good ? nitro_ui::kGood : nitro_ui::kMuted);
         if (!ui.detected.empty()) {
             ImGui::SameLine();
@@ -1187,7 +1594,7 @@ void DrawUi() {
 
     // ---- Two columns
     const float colW = (avail - gap) * 0.5f;
-    const float colH = 400 * s;
+    const float colH = (ui.fsr ? 452 : 414) * s;
     if (BeginCard("##fg", ImVec2(colW, colH))) {
         CardTitle("Frame generation");
         const float toggleW = ImGui::GetFrameHeight() * 0.85f * 1.85f;
@@ -1251,9 +1658,29 @@ void DrawUi() {
             const char* items[] = {"Auto-detect", "DirectX 10 / 11 / 12", "DirectX 9", "OpenGL", "Vulkan"};
             changed |= ImGui::Combo("##api", &ui.api, items, 5);
         }
+        nitro_ui::RowLabel("AMD FSR 1");
+        {
+            const float cw = 200 * s;
+            nitro_ui::SameLineRight(cw);
+            ImGui::SetNextItemWidth(cw);
+            const char* items[] = {"Off", "Sharpen (RCAS)", "Upscale (EASU + RCAS)"};
+            changed |= ImGui::Combo("##fsr", &ui.fsr, items, 3);
+        }
+        if (ui.fsr) {
+            nitro_ui::RowLabel("Sharpness");
+            const float sw = 200 * s;
+            nitro_ui::SameLineRight(sw);
+            ImGui::SetNextItemWidth(sw);
+            ImGui::SliderInt("##sharp", &ui.sharpPct, 0, 100, "%d%%");
+            if (ImGui::IsItemDeactivatedAfterEdit()) changed = true;
+        }
         ImGui::PushFont(g_fonts.caption);
         ImGui::PushTextWrapPos(0);
-        if (ui.dynamic)
+        if (ui.fsr == 2)
+            ImGui::TextColored(nitro_ui::kMuted,
+                               "Upscale: DirectX 11/12 only. Run the game borderless or windowed at a lower "
+                               "resolution; FSR scales it to the window. Other APIs get sharpening.");
+        else if (ui.dynamic)
             ImGui::TextColored(nitro_ui::kMuted,
                                "Dynamic fills your monitor's refresh rate: it generates only as many frames as needed, "
                                "up to the multiplier.");
@@ -1326,26 +1753,8 @@ void DrawUi() {
     ImGui::Spacing();
 
     // ---- Log
-    const float footer = ImGui::GetTextLineHeightWithSpacing() + 4 * s;
-    if (BeginCard("##log", ImVec2(avail, (std::max)(90 * s, ImGui::GetContentRegionAvail().y - footer)))) {
-        ImGui::PushFont(g_fonts.caption);
-        for (const auto& [color, line] : ui.log) {
-            ImGui::PushTextWrapPos(0);
-            ImGui::TextColored(color, "%s", line.c_str());
-            ImGui::PopTextWrapPos();
-        }
-        if (ui.scrollLog) {
-            ImGui::SetScrollHereY(1.0f);
-            ui.scrollLog = false;
-        }
-        ImGui::PopFont();
-    }
-    ImGui::EndChild();
-    ImGui::PushFont(g_fonts.caption);
-    ImGui::TextColored(nitro_ui::kMuted,
-                       "Single-player games only \xC2\xB7 Not affiliated with Lossless Scaling \xC2\xB7 Logs: Nitro.log "
-                       "(game folder) or NitroVk.log (Nitro folder)");
-    ImGui::PopFont();
+    DrawLog((std::max)(90 * s, ImGui::GetContentRegionAvail().y - footer));
+    DrawFooter();
 
     if (changed) SaveUi();
     ImGui::End();
@@ -1363,7 +1772,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
     case WM_GETMINMAXINFO: {
         auto* mm = reinterpret_cast<MINMAXINFO*>(lp);
         mm->ptMinTrackSize.x = static_cast<LONG>(860 * g_scale);
-        mm->ptMinTrackSize.y = static_cast<LONG>(860 * g_scale);
+        mm->ptMinTrackSize.y = static_cast<LONG>(900 * g_scale);
         return 0;
     }
     case WM_SYSCOMMAND:
@@ -1380,6 +1789,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
 
 int WINAPI wWinMain(HINSTANCE inst, HINSTANCE, LPWSTR, int show) {
     SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
+    CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED); // WIC, for library cover art
     g_dir = ModuleDirectory(nullptr);
 
     WNDCLASSEXW wc{};
@@ -1397,7 +1807,7 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE, LPWSTR, int show) {
 
     const UINT dpi = GetDpiForSystem();
     g_scale = static_cast<float>(dpi) / 96.0f;
-    RECT rc{0, 0, static_cast<LONG>(920 * g_scale), static_cast<LONG>(940 * g_scale)};
+    RECT rc{0, 0, static_cast<LONG>(920 * g_scale), static_cast<LONG>(980 * g_scale)};
     AdjustWindowRectExForDpi(&rc, WS_OVERLAPPEDWINDOW, FALSE, 0, dpi);
     g_wnd = CreateWindowExW(0, wc.lpszClassName, L"Nitro", WS_OVERLAPPEDWINDOW, CW_USEDEFAULT, CW_USEDEFAULT,
                             rc.right - rc.left, rc.bottom - rc.top, nullptr, nullptr, inst, nullptr);
@@ -1434,7 +1844,7 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE, LPWSTR, int show) {
     } else if (ui.shadersOutdated) {
         Log(L"Lossless Scaling was updated - use Re-import to pick up the new shaders.", nitro_ui::kWarn);
     }
-    Log(L"Ready. Pick a game, choose a multiplier, then Install.");
+    Log(L"Ready. Pick a game (or open the Library), choose a multiplier, then Install.");
 
     bool running = true;
     while (running) {
@@ -1465,6 +1875,10 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE, LPWSTR, int show) {
     }
 
     SaveUi();
+    StopLibraryWorker();
+    for (auto& g : lib.games)
+        if (g.coverSrv) g.coverSrv->Release();
+    lib.games.clear();
     ImGui_ImplDX11_Shutdown();
     ImGui_ImplWin32_Shutdown();
     ImGui::DestroyContext();

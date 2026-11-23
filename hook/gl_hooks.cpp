@@ -250,7 +250,7 @@ BOOL GLState::Swap(HDC dc, BOOL(WINAPI* orig)(HDC)) {
     const bool generate = G().fgEnabled.load();
     const bool menu = OverlayVisible();
     if (!generate && bridge_) bridge_->Reset();
-    if (failed_ || (!generate && !menu)) {
+    if (failed_ || (!generate && !menu && G().cfg.fsrMode == 0)) {
         NoteFrame(0, "OpenGL", w_, h_);
         return orig(dc);
     }
@@ -300,11 +300,12 @@ BOOL GLState::Swap(HDC dc, BOOL(WINAPI* orig)(HDC)) {
         restore();
         orig(dc);
     }
-    if (drawMenu || n > 0) {
-        HANDLE obj = drawMenu ? objReal_ : objIn_;
+    const bool useReal = bridge_->RealOutputUsed();
+    if (useReal || n > 0) {
+        HANDLE obj = useReal ? objReal_ : objIn_;
         prepare();
         gl.wglDXLockObjectsNV(interop_, 1, &obj);
-        Blit(drawMenu ? fboReal_ : fboIn_, 0);
+        Blit(useReal ? fboReal_ : fboIn_, 0);
         gl.wglDXUnlockObjectsNV(interop_, 1, &obj);
         restore();
     }

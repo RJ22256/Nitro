@@ -416,7 +416,7 @@ VkResult SwapData::Present(VkQueue queue, const VkPresentInfoKHR* info) {
     const bool generate = G().fgEnabled.load();
     const bool menu = OverlayVisible();
     if (!generate && bridge_) bridge_->Reset();
-    if (!generate && !menu) {
+    if (!generate && !menu && G().cfg.fsrMode == 0) {
         NoteFrame(0, "Vulkan", extent.width, extent.height);
         return dev->QueuePresentKHR(queue, info);
     }
@@ -487,8 +487,8 @@ VkResult SwapData::Present(VkQueue queue, const VkPresentInfoKHR* info) {
         if (r != VK_SUCCESS && r != VK_SUBOPTIMAL_KHR) return r;
     }
 
-    // 4. menu open: put the real frame with the menu on it into the game's image
-    if (drawMenu && Begin(0)) {
+    // 4. menu open / FSR sharpening: put the processed real frame into the game's image
+    if (bridge_->RealOutputUsed() && Begin(0)) {
         cb = cmd_[0];
         Barrier(cb, real_, VK_IMAGE_LAYOUT_GENERAL, VK_IMAGE_LAYOUT_GENERAL, 0, VK_ACCESS_TRANSFER_READ_BIT, ext,
                 family);

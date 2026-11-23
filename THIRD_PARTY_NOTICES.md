@@ -38,6 +38,10 @@ Nitro.exe, NitroHook.dll and NitroVk.dll include Dear ImGui (https://github.com/
 
 NitroVk.dll is built with the Khronos Vulkan headers (https://github.com/KhronosGroup/Vulkan-Headers), Apache License 2.0.
 
+## AMD FidelityFX Super Resolution 1
+
+NitroHook.dll and NitroVk.dll (and their 32-bit versions) embed AMD FidelityFX FSR 1.0.2 (https://github.com/GPUOpen-Effects/FidelityFX-FSR): `ffx_a.h`, `ffx_fsr1.h` and the sample's `FSR_Pass.hlsl` (included in this repository as `core/shaders/fsr_pass.hlsl`). MIT licence, Copyright (c) 2021 Advanced Micro Devices, Inc. All rights reserved. The licence text is the MIT licence above, with AMD's copyright line.
+
 ## Lossless Scaling
 
 Lossless Scaling and its shaders are the property of their developer. This project ships none of them; it reads them from the user's own Lossless.dll at runtime.

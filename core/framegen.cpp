@@ -25,6 +25,8 @@ UINT Half(UINT v) { return std::max(1u, (v + 1) >> 1); }
 UINT Shr(UINT v, int s) { return std::max(1u, v >> s); }
 UINT Groups(UINT v, int shift) { return (v + (1u << shift) - 1) >> shift; }
 
+} // namespace
+
 DXGI_FORMAT TypelessFormat(DXGI_FORMAT f) {
     switch (f) {
     case DXGI_FORMAT_R8G8B8A8_UNORM:
@@ -38,8 +40,6 @@ DXGI_FORMAT TypelessFormat(DXGI_FORMAT f) {
     default: return f;
     }
 }
-
-} // namespace
 
 // Raw (non-sRGB) view so the shaders see the same encoded values a screen
 // capture would.

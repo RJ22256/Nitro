@@ -163,7 +163,20 @@ void Bridge::WaitIdle() {
 }
 
 int Bridge::Run(bool generate, const OverlayFn& overlay, int gens, int denom) {
+    realUsed_ = false;
     if (!fg_) return 0;
+    // FSR 1 sharpening on the real frame, before frame generation
+    const bool sharpen = G().cfg.fsrMode >= 1;
+    if (sharpen && !fsrTried_) {
+        fsrTried_ = true;
+        std::string err;
+        fsrReady_ = fsr_.Init(dev_.Get(), err);
+        if (!fsrReady_) Log("FSR 1 unavailable: %s", err.c_str());
+    }
+    const bool sharpened =
+        sharpen && fsrReady_ &&
+        fsr_.Apply(ctx_.Get(), in_.Get(), p_.format, p_.width, p_.height, in_.Get(), p_.format, p_.width, p_.height,
+                   false, G().cfg.fsrSharpness);
     if (!generate) fg_->Reset();
     const int n = generate ? fg_->Process(ctx_.Get(), in_.Get(), gens, denom) : 0;
     for (int k = 0; k < n; ++k) {
@@ -174,9 +187,10 @@ int Bridge::Run(bool generate, const OverlayFn& overlay, int gens, int denom) {
             blit_.Blit(ctx_.Get(), t.srv.Get(), outs_[k].Get(), p_.width, p_.height, false);
         if (overlay) overlay(ctx_.Get(), outs_[k].Get());
     }
-    if (overlay) {
+    if (overlay || sharpened) {
         ctx_->CopyResource(real_.Get(), in_.Get());
-        overlay(ctx_.Get(), real_.Get());
+        if (overlay) overlay(ctx_.Get(), real_.Get());
+        realUsed_ = true;
     }
     WaitIdle();
     return n;

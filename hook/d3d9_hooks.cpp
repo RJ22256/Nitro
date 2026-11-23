@@ -133,7 +133,7 @@ HRESULT D9State::Present(IDirect3DDevice9* dev, const std::function<HRESULT(IDir
     const bool generate = G().fgEnabled.load();
     const bool menu = OverlayVisible();
     if (!generate && bridge_) bridge_->Reset();
-    if (failed_ || (!generate && !menu)) {
+    if (failed_ || (!generate && !menu && G().cfg.fsrMode == 0)) {
         NoteFrame(0, "DirectX 9", w_, h_);
         return present();
     }
@@ -186,7 +186,7 @@ HRESULT D9State::Present(IDirect3DDevice9* dev, const std::function<HRESULT(IDir
 
     // Put the real frame back (with the menu on it, if open) and present it
     bb.Reset();
-    if (drawMenu) {
+    if (bridge_->RealOutputUsed()) {
         if (SUCCEEDED(sysOut_->LockRect(&lr, nullptr, 0))) {
             const bool ok = bridge_->Download(-1, lr.pBits, static_cast<UINT>(lr.Pitch), w_ * 4, h_);
             sysOut_->UnlockRect();

@@ -35,6 +35,7 @@ WNDPROC g_origProc = nullptr;
 ImDrawData* g_drawData = nullptr;
 ULONGLONG g_lastBegin = 0;
 ULONGLONG g_savedAt = 0;
+int g_fsrPending = -1; // FSR mode chosen in the menu that needs a restart
 
 using SetCursorPosFn = BOOL(WINAPI*)(int, int);
 using ClipCursorFn = BOOL(WINAPI*)(const RECT*);
@@ -288,10 +289,44 @@ void BuildMenu() {
         }
     }
 
+    // FSR 1. Off <-> Sharpen switches live; Upscale changes the swap chain
+    // sizes, so it only takes effect the next time the game starts.
+    nitro_ui::RowLabel("AMD FSR 1");
+    {
+        const float cw = 120 * s;
+        nitro_ui::SameLineRight(cw);
+        ImGui::SetNextItemWidth(cw);
+        const char* items[] = {"Off", "Sharpen", "Upscale"};
+        int sel = g_fsrPending >= 0 ? g_fsrPending : g.cfg.fsrMode;
+        if (ImGui::Combo("##fsr", &sel, items, 3)) {
+            if (sel == 2 || g.cfg.fsrMode == 2) {
+                g_fsrPending = sel == g.cfg.fsrMode ? -1 : sel;
+            } else {
+                g.cfg.fsrMode = sel;
+                g_fsrPending = -1;
+                BumpSettings();
+            }
+        }
+    }
+    if ((g_fsrPending >= 0 ? g_fsrPending : g.cfg.fsrMode) > 0) {
+        nitro_ui::RowLabel("Sharpness");
+        const float sw = 190 * s;
+        nitro_ui::SameLineRight(sw);
+        ImGui::SetNextItemWidth(sw);
+        int pct = static_cast<int>(g.cfg.fsrSharpness * 100.0f + 0.5f);
+        if (ImGui::SliderInt("##sharp", &pct, 0, 100, "%d%%")) g.cfg.fsrSharpness = static_cast<float>(pct) / 100.0f;
+    }
+    if (g_fsrPending >= 0) {
+        ImGui::PushFont(g_fonts.caption);
+        ImGui::TextColored(nitro_ui::kWarn, "Upscale changes apply after you save and restart the game.");
+        ImGui::PopFont();
+    }
+
     ImGui::Spacing();
     const float bw = (ImGui::GetContentRegionAvail().x - ImGui::GetStyle().ItemSpacing.x) * 0.5f;
     if (nitro_ui::AccentButton("Save as default", ImVec2(bw, 36 * s))) {
         Config c = g.cfg;
+        if (g_fsrPending >= 0) c.fsrMode = g_fsrPending;
         c.multiplier = g.multiplier.load();
         c.enabled = g.fgEnabled.load();
         if (SaveConfig(g.dir + L"\\" + kConfigFileName, c)) g_savedAt = GetTickCount64();
@@ -314,28 +349,32 @@ bool OverlayVisible() {
     return G().menuOpen.load();
 }
 
+namespace {
+struct FindCtx {
+    DWORD pid;
+    HWND best;
+    LONG area;
+};
+
+BOOL CALLBACK FindMainWindowProc(HWND h, LPARAM lp) {
+    auto* c = reinterpret_cast<FindCtx*>(lp);
+    DWORD pid = 0;
+    GetWindowThreadProcessId(h, &pid);
+    if (pid != c->pid || !IsWindowVisible(h) || GetWindow(h, GW_OWNER)) return TRUE;
+    RECT r{};
+    GetClientRect(h, &r);
+    const LONG area = (r.right - r.left) * (r.bottom - r.top);
+    if (area > c->area) {
+        c->area = area;
+        c->best = h;
+    }
+    return TRUE;
+}
+} // namespace
+
 HWND FindMainWindow() {
-    struct Ctx {
-        DWORD pid;
-        HWND best;
-        LONG area;
-    } c{GetCurrentProcessId(), nullptr, 0};
-    EnumWindows(
-        [](HWND h, LPARAM lp) -> BOOL {
-            auto* c = reinterpret_cast<Ctx*>(lp);
-            DWORD pid = 0;
-            GetWindowThreadProcessId(h, &pid);
-            if (pid != c->pid || !IsWindowVisible(h) || GetWindow(h, GW_OWNER)) return TRUE;
-            RECT r{};
-            GetClientRect(h, &r);
-            const LONG area = (r.right - r.left) * (r.bottom - r.top);
-            if (area > c->area) {
-                c->area = area;
-                c->best = h;
-            }
-            return TRUE;
-        },
-        reinterpret_cast<LPARAM>(&c));
+    FindCtx c{GetCurrentProcessId(), nullptr, 0};
+    EnumWindows(&FindMainWindowProc, reinterpret_cast<LPARAM>(&c));
     return c.best;
 }
 
