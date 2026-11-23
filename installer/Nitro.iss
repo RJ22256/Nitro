@@ -94,6 +94,6 @@ begin
   Result := True;
   if not UninstallSilent then
     Result := MsgBox('Before uninstalling, open Nitro and use "Remove from game" (or Remove in the Library) ' +
-                     'for every game you installed it into. Uninstalling Nitro doesn''t touch your game folders.' +
-                     #13#10#13#10 + 'Uninstall Nitro now?', mbConfirmation, MB_YESNO) = IDYES;
+                     'for every game you installed it into. Uninstalling Nitro doesn''t touch your game folders.' + #13#10 + #13#10 +
+                     'Uninstall Nitro now?', mbConfirmation, MB_YESNO) = IDYES;
 end;
