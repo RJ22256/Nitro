@@ -1594,8 +1594,11 @@ void DrawUi() {
 
     // ---- Two columns
     const float colW = (avail - gap) * 0.5f;
-    const float colH = (ui.fsr ? 452 : 414) * s;
-    if (BeginCard("##fg", ImVec2(colW, colH))) {
+    // The left card fits its rows (font metrics differ between SST and Segoe
+    // UI); the right column matches its height from the previous frame.
+    static float fgH = 0.0f;
+    const float colH = (std::max)(fgH, 380 * s);
+    if (BeginCard("##fg", ImVec2(colW, 0))) {
         CardTitle("Frame generation");
         const float toggleW = ImGui::GetFrameHeight() * 0.85f * 1.85f;
         nitro_ui::RowLabel("Mode");
@@ -1690,6 +1693,7 @@ void DrawUi() {
         ImGui::PopFont();
     }
     ImGui::EndChild();
+    fgH = ImGui::GetItemRectSize().y;
     ImGui::SameLine(0, gap);
     ImGui::BeginGroup();
     const float lossH = 176 * s;
@@ -1807,7 +1811,7 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE, LPWSTR, int show) {
 
     const UINT dpi = GetDpiForSystem();
     g_scale = static_cast<float>(dpi) / 96.0f;
-    RECT rc{0, 0, static_cast<LONG>(920 * g_scale), static_cast<LONG>(980 * g_scale)};
+    RECT rc{0, 0, static_cast<LONG>(920 * g_scale), static_cast<LONG>(1020 * g_scale)};
     AdjustWindowRectExForDpi(&rc, WS_OVERLAPPEDWINDOW, FALSE, 0, dpi);
     g_wnd = CreateWindowExW(0, wc.lpszClassName, L"Nitro", WS_OVERLAPPEDWINDOW, CW_USEDEFAULT, CW_USEDEFAULT,
                             rc.right - rc.left, rc.bottom - rc.top, nullptr, nullptr, inst, nullptr);

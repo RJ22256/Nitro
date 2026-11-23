@@ -395,7 +395,19 @@ bool OverlayBegin(ID3D11Device* dev, ID3D11DeviceContext* ctx, HWND hwnd, UINT w
         RECT rc{};
         GetClientRect(hwnd, &rc);
         g_scale = std::clamp(static_cast<float>(rc.bottom - rc.top) / 1080.0f, 0.75f, 2.5f);
+        // Installed hooks live in the game folder; SST fonts sit in the Nitro
+        // folder, which is where Nitro.shaders is.
+        const std::wstring& shaders = G().cfg.shaders;
+        const size_t slash = shaders.find_last_of(L"\\/");
+        if (slash != std::wstring::npos) {
+            const std::wstring dir = shaders.substr(0, slash);
+            const int n = WideCharToMultiByte(CP_UTF8, 0, dir.c_str(), -1, nullptr, 0, nullptr, nullptr);
+            std::string utf8(static_cast<size_t>(n > 0 ? n - 1 : 0), '\0');
+            if (n > 1) WideCharToMultiByte(CP_UTF8, 0, dir.c_str(), -1, utf8.data(), n, nullptr, nullptr);
+            nitro_ui::AddFontDir(utf8);
+        }
         g_fonts = nitro_ui::LoadFonts(18.0f * g_scale);
+        Log("In-game menu font: %s", g_fonts.sst ? "SST" : "Segoe UI");
         nitro_ui::ApplyStyle(g_scale, 0.96f);
         InstallCursorHooks();
         Log("In-game menu ready");

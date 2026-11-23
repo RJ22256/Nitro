@@ -11,44 +11,128 @@
 
 #include <algorithm>
 #include <cstdio>
+#include <initializer_list>
 #include <string>
+#include <vector>
 
 namespace nitro_ui {
 
 namespace {
 
+std::vector<std::string> g_fontDirs; // extra folders from AddFontDir, searched first
+
 #ifdef _WIN32
-std::string FontPath(const char* file) {
-    char dir[MAX_PATH] = {};
-    GetWindowsDirectoryA(dir, MAX_PATH);
-    return std::string(dir) + "\\Fonts\\" + file;
+std::string Utf8(const std::wstring& w) {
+    if (w.empty()) return {};
+    const int n = WideCharToMultiByte(CP_UTF8, 0, w.c_str(), static_cast<int>(w.size()), nullptr, 0, nullptr, nullptr);
+    std::string s(static_cast<size_t>(n), '\0');
+    WideCharToMultiByte(CP_UTF8, 0, w.c_str(), static_cast<int>(w.size()), s.data(), n, nullptr, nullptr);
+    return s;
+}
+
+std::wstring Wide(const std::string& s) {
+    if (s.empty()) return {};
+    const int n = MultiByteToWideChar(CP_UTF8, 0, s.c_str(), static_cast<int>(s.size()), nullptr, 0);
+    std::wstring w(static_cast<size_t>(n), L'\0');
+    MultiByteToWideChar(CP_UTF8, 0, s.c_str(), static_cast<int>(s.size()), w.data(), n);
+    return w;
 }
 
 bool Exists(const std::string& p) {
-    return GetFileAttributesA(p.c_str()) != INVALID_FILE_ATTRIBUTES;
-}
-#else
-// Non-Windows builds (UI previews only): fonts come from NITRO_FONT_DIR.
-std::string FontPath(const char* file) {
-    const char* dir = std::getenv("NITRO_FONT_DIR");
-    return std::string(dir ? dir : ".") + "/" + file;
+    const DWORD a = GetFileAttributesW(Wide(p).c_str());
+    return a != INVALID_FILE_ATTRIBUTES && !(a & FILE_ATTRIBUTE_DIRECTORY);
 }
 
+// Folder of the module this code is linked into (Nitro.exe or the hook DLL).
+std::string ModuleDir() {
+    HMODULE self = nullptr;
+    GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+                       reinterpret_cast<LPCWSTR>(&ModuleDir), &self);
+    wchar_t path[MAX_PATH] = {};
+    GetModuleFileNameW(self, path, MAX_PATH);
+    std::wstring p = path;
+    const size_t slash = p.find_last_of(L"\\/");
+    return slash == std::wstring::npos ? std::string(".") : Utf8(p.substr(0, slash));
+}
+
+// Where fonts are looked for: AddFontDir folders, a Fonts folder next to
+// Nitro, fonts installed for this user, then the Windows font folder.
+std::vector<std::string> FontDirs() {
+    std::vector<std::string> dirs;
+    for (const std::string& d : g_fontDirs) {
+        dirs.push_back(d + "\\Fonts");
+        dirs.push_back(d);
+    }
+    const std::string mod = ModuleDir();
+    dirs.push_back(mod + "\\Fonts");
+    dirs.push_back(mod);
+    wchar_t buf[MAX_PATH] = {};
+    if (GetEnvironmentVariableW(L"LOCALAPPDATA", buf, MAX_PATH))
+        dirs.push_back(Utf8(buf) + "\\Microsoft\\Windows\\Fonts");
+    GetWindowsDirectoryW(buf, MAX_PATH);
+    dirs.push_back(Utf8(buf) + "\\Fonts");
+    return dirs;
+}
+const char kSep = '\\';
+#else
+// Non-Windows builds (UI previews only): fonts come from NITRO_FONT_DIR.
 bool Exists(const std::string& p) {
     struct stat st {};
     return stat(p.c_str(), &st) == 0;
 }
+
+std::vector<std::string> FontDirs() {
+    std::vector<std::string> dirs = g_fontDirs;
+    const char* dir = std::getenv("NITRO_FONT_DIR");
+    dirs.push_back(dir ? dir : ".");
+    return dirs;
+}
+const char kSep = '/';
 #endif
 
+std::string FindFont(const char* file) {
+    for (const std::string& d : FontDirs()) {
+        const std::string p = d + kSep + file;
+        if (Exists(p)) return p;
+    }
+    return {};
+}
+
+const ImWchar kRanges[] = {0x0020, 0x00FF, 0x2013, 0x2026, 0x2190, 0x2193, 0x00D7, 0x00D7, 0};
+
 ImFont* Load(const char* file, float px) {
-    ImGuiIO& io = ImGui::GetIO();
-    const std::string path = FontPath(file);
-    if (!Exists(path)) return nullptr;
+    const std::string path = FindFont(file);
+    if (path.empty()) return nullptr;
     ImFontConfig cfg;
     cfg.OversampleH = 2;
     cfg.OversampleV = 2;
-    static const ImWchar ranges[] = {0x0020, 0x00FF, 0x2013, 0x2026, 0x2190, 0x2193, 0x00D7, 0x00D7, 0};
-    return io.Fonts->AddFontFromFileTTF(path.c_str(), px, &cfg, ranges);
+    return ImGui::GetIO().Fonts->AddFontFromFileTTF(path.c_str(), px, &cfg, kRanges);
+}
+
+// SST has no arrow glyphs; borrow them from Segoe UI when it's there.
+void MergeFallback(float px) {
+    const std::string path = FindFont("segoeui.ttf");
+    if (path.empty()) return;
+    static const ImWchar arrows[] = {0x2190, 0x2193, 0};
+    ImFontConfig cfg;
+    cfg.MergeMode = true;
+    cfg.OversampleH = 2;
+    cfg.OversampleV = 2;
+    ImGui::GetIO().Fonts->AddFontFromFileTTF(path.c_str(), px, &cfg, arrows);
+}
+
+// Tries each file in turn (SST first, then Segoe UI).
+ImFont* LoadFirst(std::initializer_list<const char*> files, float px, bool* usedSst = nullptr) {
+    bool first = true;
+    for (const char* f : files) {
+        if (ImFont* font = Load(f, px)) {
+            if (first) MergeFallback(px);
+            if (usedSst) *usedSst = first;
+            return font;
+        }
+        first = false;
+    }
+    return nullptr;
 }
 
 ImU32 Mix(ImU32 a, ImU32 b, float t) {
@@ -59,15 +143,22 @@ ImU32 Mix(ImU32 a, ImU32 b, float t) {
 
 } // namespace
 
+void AddFontDir(const std::string& utf8Dir) {
+    if (!utf8Dir.empty()) g_fontDirs.push_back(utf8Dir);
+}
+
+// SST (Sony's PlayStation typeface) when its .ttf files are available,
+// otherwise Segoe UI, otherwise ImGui's built-in font. SST can't be shipped
+// with Nitro, so it's picked up from the user's own copy.
 Fonts LoadFonts(float px) {
     Fonts f;
-    f.body = Load("segoeui.ttf", px);
+    f.body = LoadFirst({"SSTRg.TTF", "segoeui.ttf"}, px, &f.sst);
     if (!f.body) f.body = ImGui::GetIO().Fonts->AddFontDefault();
-    f.bold = Load("seguisb.ttf", px);
+    f.bold = LoadFirst({f.sst ? "SSTMedium.TTF" : "seguisb.ttf", "seguisb.ttf"}, px);
     if (!f.bold) f.bold = f.body;
-    f.title = Load("segoeuib.ttf", px * 2.4f);
+    f.title = LoadFirst({f.sst ? "SSTBold.TTF" : "segoeuib.ttf", "segoeuib.ttf"}, px * 2.4f);
     if (!f.title) f.title = f.bold;
-    f.caption = Load("segoeui.ttf", px * 0.82f);
+    f.caption = LoadFirst({f.sst ? "SSTRg.TTF" : "segoeui.ttf", "segoeui.ttf"}, px * 0.82f);
     if (!f.caption) f.caption = f.body;
     ImGui::GetIO().FontDefault = f.body;
     return f;

@@ -34,6 +34,7 @@ Powered by the frame-generation algorithm from your own copy of [Lossless Scalin
 - **Detects the game's graphics API automatically**, or you can pick it yourself
 - **Runs inside the game**: no window capture, no borderless-window requirement, no overlay app running alongside
 - **Two ways to load it:** install it once (works with Steam launches), or launch the game with Nitro injected
+- **SST interface** (Sony's PlayStation font) when you supply the font files, otherwise Segoe UI
 - **In-game menu** (<kbd>Insert</kbd>): change frame gen, the multiplier, flow scale, performance mode, VSync pacing, HDR and FSR live, see rendered and on-screen FPS, and save the settings as your default
 - **Live hotkeys:** <kbd>End</kbd> toggles frame gen, <kbd>Home</kbd> cycles 2x → 3x → 4x
 - **Quality & performance modes**, adjustable flow scale, HDR support
@@ -81,6 +82,10 @@ For **Upscale**, run the game **borderless or windowed** and set its resolution 
 
 > [!NOTE]
 > **Why not FSR 3?** FSR 3 (upscaling and frame generation) needs the game's motion vectors, depth buffer and an unjittered camera. Only the engine has those, so FSR 3 can't be bolted onto an arbitrary game the way FSR 1 and Lossless Scaling's frame gen can. For games that already support DLSS, FSR 2 or XeSS, [OptiScaler](https://github.com/optiscaler/OptiScaler) can swap in FSR 3; Nitro's frame gen works alongside it.
+
+### SST interface font
+
+Nitro's app and in-game menu use Sony's **SST** typeface (the PlayStation UI font) when they can find it, and fall back to Segoe UI otherwise. SST is a commercial font, so it isn't included. If you have a licensed copy, put `SSTRg.TTF`, `SSTMedium.TTF` and `SSTBold.TTF` in the `Fonts` folder next to `Nitro.exe` (or install SST in Windows), then restart Nitro and the game. `Nitro.log` says which font the in-game menu loaded.
 
 ### 32-bit games
 

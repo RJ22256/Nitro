@@ -38,6 +38,8 @@ jobs:
           Copy-Item build/dist/Nitro.exe, build/dist/NitroHook.dll, build/dist/NitroVk.dll, build/dist/NitroVk.json $pkg
           Copy-Item build32/dist/NitroHook32.dll, build32/dist/NitroVk32.dll, build32/dist/NitroVk32.json, build32/dist/NitroInject32.exe $pkg
           Copy-Item README.md, THIRD_PARTY_NOTICES.md $pkg
+          New-Item -ItemType Directory -Force "$pkg/Fonts" | Out-Null
+          Copy-Item assets/fonts/README.txt "$pkg/Fonts/README.txt"
           Compress-Archive -Path $pkg -DestinationPath package/Nitro-x64.zip -Force
 
       - uses: actions/upload-artifact@v4
