@@ -42,9 +42,9 @@ NitroVk.dll is built with the Khronos Vulkan headers (https://github.com/Khronos
 
 NitroHook.dll and NitroVk.dll (and their 32-bit versions) embed AMD FidelityFX FSR 1.0.2 (https://github.com/GPUOpen-Effects/FidelityFX-FSR): `ffx_a.h`, `ffx_fsr1.h` and the sample's `FSR_Pass.hlsl` (included in this repository as `core/shaders/fsr_pass.hlsl`). MIT licence, Copyright (c) 2021 Advanced Micro Devices, Inc. All rights reserved. The licence text is the MIT licence above, with AMD's copyright line.
 
-## SST typeface
+## Source Sans 3
 
-Nitro can display its interface in SST (Monotype for Sony). The font is not included in this repository or in Nitro's releases; Nitro only loads a copy the user supplies.
+The `Fonts` folder contains Source Sans 3 (https://github.com/adobe-fonts/source-sans), unmodified. Copyright 2010-2024 Adobe, with Reserved Font Name 'Source'. Licensed under the SIL Open Font License, Version 1.1; the full licence is in `Fonts/OFL.txt`.
 
 ## Lossless Scaling
 

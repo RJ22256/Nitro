@@ -11,7 +11,6 @@
 
 #include <algorithm>
 #include <cstdio>
-#include <initializer_list>
 #include <string>
 #include <vector>
 
@@ -109,32 +108,6 @@ ImFont* Load(const char* file, float px) {
     return ImGui::GetIO().Fonts->AddFontFromFileTTF(path.c_str(), px, &cfg, kRanges);
 }
 
-// SST has no arrow glyphs; borrow them from Segoe UI when it's there.
-void MergeFallback(float px) {
-    const std::string path = FindFont("segoeui.ttf");
-    if (path.empty()) return;
-    static const ImWchar arrows[] = {0x2190, 0x2193, 0};
-    ImFontConfig cfg;
-    cfg.MergeMode = true;
-    cfg.OversampleH = 2;
-    cfg.OversampleV = 2;
-    ImGui::GetIO().Fonts->AddFontFromFileTTF(path.c_str(), px, &cfg, arrows);
-}
-
-// Tries each file in turn (SST first, then Segoe UI).
-ImFont* LoadFirst(std::initializer_list<const char*> files, float px, bool* usedSst = nullptr) {
-    bool first = true;
-    for (const char* f : files) {
-        if (ImFont* font = Load(f, px)) {
-            if (first) MergeFallback(px);
-            if (usedSst) *usedSst = first;
-            return font;
-        }
-        first = false;
-    }
-    return nullptr;
-}
-
 ImU32 Mix(ImU32 a, ImU32 b, float t) {
     const ImVec4 x = ImGui::ColorConvertU32ToFloat4(a), y = ImGui::ColorConvertU32ToFloat4(b);
     return ImGui::ColorConvertFloat4ToU32(ImVec4(x.x + (y.x - x.x) * t, x.y + (y.y - x.y) * t,
@@ -147,18 +120,21 @@ void AddFontDir(const std::string& utf8Dir) {
     if (!utf8Dir.empty()) g_fontDirs.push_back(utf8Dir);
 }
 
-// SST (Sony's PlayStation typeface) when its .ttf files are available,
-// otherwise Segoe UI, otherwise ImGui's built-in font. SST can't be shipped
-// with Nitro, so it's picked up from the user's own copy.
+// Source Sans 3 (shipped in Nitro's Fonts folder, SIL Open Font License),
+// otherwise Segoe UI, otherwise ImGui's built-in font. Source Sans runs a
+// tall line height, so sizes stay as they are.
 Fonts LoadFonts(float px) {
     Fonts f;
-    f.body = LoadFirst({"SSTRg.TTF", "segoeui.ttf"}, px, &f.sst);
+    const float k = 1.0f;
+    f.body = Load("SourceSans3-Regular.ttf", px * k);
+    f.shipped = f.body != nullptr;
+    if (!f.body) f.body = Load("segoeui.ttf", px);
     if (!f.body) f.body = ImGui::GetIO().Fonts->AddFontDefault();
-    f.bold = LoadFirst({f.sst ? "SSTMedium.TTF" : "seguisb.ttf", "seguisb.ttf"}, px);
+    f.bold = f.shipped ? Load("SourceSans3-Semibold.ttf", px * k) : Load("seguisb.ttf", px);
     if (!f.bold) f.bold = f.body;
-    f.title = LoadFirst({f.sst ? "SSTBold.TTF" : "segoeuib.ttf", "segoeuib.ttf"}, px * 2.4f);
+    f.title = f.shipped ? Load("SourceSans3-Bold.ttf", px * k * 2.4f) : Load("segoeuib.ttf", px * 2.4f);
     if (!f.title) f.title = f.bold;
-    f.caption = LoadFirst({f.sst ? "SSTRg.TTF" : "segoeui.ttf", "segoeui.ttf"}, px * 0.82f);
+    f.caption = f.shipped ? Load("SourceSans3-Regular.ttf", px * k * 0.82f) : Load("segoeui.ttf", px * 0.82f);
     if (!f.caption) f.caption = f.body;
     ImGui::GetIO().FontDefault = f.body;
     return f;

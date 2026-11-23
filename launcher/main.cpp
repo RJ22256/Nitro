@@ -1594,8 +1594,8 @@ void DrawUi() {
 
     // ---- Two columns
     const float colW = (avail - gap) * 0.5f;
-    // The left card fits its rows (font metrics differ between SST and Segoe
-    // UI); the right column matches its height from the previous frame.
+    // The left card fits its rows (its height depends on the font and DPI
+    // scale); the right column matches its height from the previous frame.
     static float fgH = 0.0f;
     const float colH = (std::max)(fgH, 380 * s);
     if (BeginCard("##fg", ImVec2(colW, 0))) {

@@ -22,14 +22,14 @@ struct Fonts {
     ImFont* bold = nullptr;
     ImFont* title = nullptr;
     ImFont* caption = nullptr;
-    bool sst = false; // Sony's SST typeface was found and is in use
+    bool shipped = false; // Nitro's own font (Source Sans 3) was found
 };
 
 // Adds a folder to search for fonts (its Fonts subfolder is searched too).
 void AddFontDir(const std::string& utf8Dir);
 
-// Loads SST if its .ttf files are found (a Fonts folder next to Nitro, or
-// installed in Windows), else Segoe UI, else ImGui's built-in font.
+// Loads Source Sans 3 from Nitro's Fonts folder, else Segoe UI, else ImGui's
+// built-in font.
 Fonts LoadFonts(float px);
 void ApplyStyle(float scale, float windowAlpha = 1.0f);
 
