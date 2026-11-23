@@ -11,6 +11,8 @@
 #include <dxgi1_4.h>
 #include <wrl/client.h>
 
+#include <MinHook.h>
+
 #include <cstdio>
 #include <memory>
 #include <mutex>
@@ -55,8 +57,12 @@ constexpr int kSlotPresent1 = 22;
 constexpr int kSlotResizeBuffers1 = 39;
 constexpr int kSlotExecuteCommandLists = 10; // ID3D12CommandQueue
 
+// Hooks are inline (MinHook) on the swap chain's implementation functions,
+// so they catch every call, even through vtable copies made by overlays or
+// wrappers. Each distinct Present implementation gets its own group; the
+// function pointers below are the trampolines that call the original code.
 struct VtHooks {
-    void** vt = nullptr;
+    void* target = nullptr; // the Present implementation this group is for
     PresentFn present = nullptr;
     Present1Fn present1 = nullptr;
     ResizeBuffersFn resize = nullptr;
@@ -70,12 +76,23 @@ constexpr int kMaxVtables = 8;
 VtHooks g_vt[kMaxVtables];
 std::atomic<int> g_vtCount{0};
 
-const VtHooks* FindVt(void* obj) {
+// The originals to call for this object. Objects whose vtable we don't
+// recognise (a wrapper's) are called through their own vtable; that ends in
+// our hook, which passes straight through because InHook() is set.
+VtHooks FindVt(void* obj) {
     void** vt = *reinterpret_cast<void***>(obj);
     const int n = g_vtCount.load();
     for (int i = 0; i < n; ++i)
-        if (g_vt[i].vt == vt) return &g_vt[i];
-    return &g_vt[0];
+        if (g_vt[i].target == vt[kSlotPresent]) return g_vt[i];
+    VtHooks d;
+    d.present = reinterpret_cast<PresentFn>(vt[kSlotPresent]);
+    d.present1 = reinterpret_cast<Present1Fn>(vt[kSlotPresent1]);
+    d.resize = reinterpret_cast<ResizeBuffersFn>(vt[kSlotResizeBuffers]);
+    d.resize1 = reinterpret_cast<ResizeBuffers1Fn>(vt[kSlotResizeBuffers1]);
+    d.getBuffer = reinterpret_cast<GetBufferFn>(vt[kSlotGetBuffer]);
+    d.getDesc = reinterpret_cast<GetDescFn>(vt[kSlotGetDesc]);
+    d.getDesc1 = reinterpret_cast<GetDesc1Fn>(vt[kSlotGetDesc1]);
+    return d;
 }
 
 // ---------------------------------------------------------------------------
@@ -205,7 +222,7 @@ private:
     bool d3d10_ = false;
     bool fgFailed_ = false;
     IUnknown* deviceKey_ = nullptr;
-    const VtHooks* vt_ = nullptr;
+    VtHooks vt_;
 
     // FSR 1
     Fsr fsr_;
@@ -394,7 +411,7 @@ bool SwapState::EnsureFrameGen(const DXGI_SWAP_CHAIN_DESC& d) {
 bool SwapState::BeginFrame(IDXGISwapChain* sc, ComPtr<ID3D11Texture2D>& bb) {
     bb.Reset();
     if (!d3d12_) {
-        if (FAILED(vt_->getBuffer(sc, 0, IID_PPV_ARGS(&bb)))) return false;
+        if (FAILED(vt_.getBuffer(sc, 0, IID_PPV_ARGS(&bb)))) return false;
         ctx1_->SwapDeviceContextState(ourState_.Get(), &savedState_);
         return true;
     }
@@ -403,7 +420,7 @@ bool SwapState::BeginFrame(IDXGISwapChain* sc, ComPtr<ID3D11Texture2D>& bb) {
     if (FAILED(sc->QueryInterface(IID_PPV_ARGS(&sc3)))) return false;
     const UINT idx = sc3->GetCurrentBackBufferIndex();
     ComPtr<ID3D12Resource> res;
-    if (FAILED(vt_->getBuffer(sc, idx, IID_PPV_ARGS(&res)))) return false;
+    if (FAILED(vt_.getBuffer(sc, idx, IID_PPV_ARGS(&res)))) return false;
 
     auto it = wrapped_.find(res.Get());
     if (it == wrapped_.end()) {
@@ -518,7 +535,7 @@ HRESULT SwapState::PresentD3D10(const PresentCall& call, const DXGI_SWAP_CHAIN_D
                                                      DXGI_PRESENT_DO_NOT_SEQUENCE);
 
     ComPtr<ID3D10Texture2D> bb;
-    if (FAILED(vt_->getBuffer(call.sc, 0, IID_PPV_ARGS(&bb)))) return call.Real(call.sync, call.flags);
+    if (FAILED(vt_.getBuffer(call.sc, 0, IID_PPV_ARGS(&bb)))) return call.Real(call.sync, call.flags);
     dev10_->CopyResource(in10_.Get(), bb.Get());
     Wait10();
 
@@ -534,7 +551,7 @@ HRESULT SwapState::PresentD3D10(const PresentCall& call, const DXGI_SWAP_CHAIN_D
         bb.Reset();
         const HRESULT hr = call.Generated(sync, genFlags);
         if (FAILED(hr)) return hr;
-        if (FAILED(vt_->getBuffer(call.sc, 0, IID_PPV_ARGS(&bb)))) return call.Real(sync, flags);
+        if (FAILED(vt_.getBuffer(call.sc, 0, IID_PPV_ARGS(&bb)))) return call.Real(sync, flags);
     }
     if (bridge_->RealOutputUsed())
         dev10_->CopyResource(bb.Get(), real10_.Get());
@@ -556,11 +573,11 @@ bool SwapState::EnsureFsr() {
 
 HRESULT SwapState::GetProxy(IDXGISwapChain* sc, UINT idx, REFIID riid, void** out) {
     DXGI_SWAP_CHAIN_DESC rd{};
-    vt_->getDesc(sc, &rd);
+    vt_.getDesc(sc, &rd);
     if (rd.SampleDesc.Count > 1 || !IsSupportedBackbufferFormat(rd.BufferDesc.Format)) {
         Log("FSR upscaling needs a plain RGBA/BGRA/10-bit/FP16 swap chain - off for this game");
         scaling_ = false;
-        return vt_->getBuffer(sc, idx, riid, out);
+        return vt_.getBuffer(sc, idx, riid, out);
     }
     if (!gameW_ || !gameH_) {
         gameW_ = rd.BufferDesc.Width;
@@ -579,13 +596,13 @@ HRESULT SwapState::GetProxy(IDXGISwapChain* sc, UINT idx, REFIID riid, void** ou
             d.BindFlags = D3D11_BIND_RENDER_TARGET | D3D11_BIND_SHADER_RESOURCE;
             if (FAILED(dev_->CreateTexture2D(&d, nullptr, &proxy11_))) {
                 scaling_ = false;
-                return vt_->getBuffer(sc, idx, riid, out);
+                return vt_.getBuffer(sc, idx, riid, out);
             }
         }
         return proxy11_->QueryInterface(riid, out);
     }
     ComPtr<ID3D12Device> d12;
-    if (FAILED(queue_->GetDevice(IID_PPV_ARGS(&d12)))) return vt_->getBuffer(sc, idx, riid, out);
+    if (FAILED(queue_->GetDevice(IID_PPV_ARGS(&d12)))) return vt_.getBuffer(sc, idx, riid, out);
     if (proxy12_.size() < rd.BufferCount) proxy12_.resize(rd.BufferCount);
     if (idx >= proxy12_.size()) return DXGI_ERROR_INVALID_CALL;
     if (!proxy12_[idx]) {
@@ -628,8 +645,8 @@ void SwapState::EnsureRealSize(IDXGISwapChain* sc, DXGI_SWAP_CHAIN_DESC& desc) {
         ctx_->ClearState();
         ctx_->Flush();
     }
-    if (SUCCEEDED(vt_->resize(sc, 0, 0, 0, DXGI_FORMAT_UNKNOWN, desc.Flags))) {
-        vt_->getDesc(sc, &desc);
+    if (SUCCEEDED(vt_.resize(sc, 0, 0, 0, DXGI_FORMAT_UNKNOWN, desc.Flags))) {
+        vt_.getDesc(sc, &desc);
         Log("FSR 1: game renders %ux%u, upscaling to %ux%u", gameW_, gameH_, desc.BufferDesc.Width,
             desc.BufferDesc.Height);
     }
@@ -691,7 +708,7 @@ HRESULT SwapState::Present(const PresentCall& call) {
     }
 
     DXGI_SWAP_CHAIN_DESC desc{};
-    if (FAILED(vt_->getDesc(call.sc, &desc))) return call.Real(call.sync, call.flags);
+    if (FAILED(vt_.getDesc(call.sc, &desc))) return call.Real(call.sync, call.flags);
     if (desc.SampleDesc.Count > 1 || !IsSupportedBackbufferFormat(desc.BufferDesc.Format)) {
         if (!warnedFormat_) {
             Log("Unsupported back buffer (format %d, %u samples) - passing through",
@@ -797,71 +814,127 @@ bool OnResize(IDXGISwapChain* sc, UINT w, UINT h) {
     st->ReleaseBuffers();
     if (!st->Scaling()) return false;
     DXGI_SWAP_CHAIN_DESC rd{};
-    FindVt(sc)->getDesc(sc, &rd);
+    FindVt(sc).getDesc(sc, &rd);
     st->OnGameResize(w, h, rd.OutputWindow);
     return true;
 }
 
+// One set of hook functions per group I; each calls group I's trampolines.
+template <int I>
 HRESULT STDMETHODCALLTYPE HookGetBuffer(IDXGISwapChain* sc, UINT idx, REFIID riid, void** out) {
-    const VtHooks* vt = FindVt(sc);
     if (!InHook() && G().cfg.fsrMode == 2 && G().ready) {
         SwapState* st = StateFor(sc);
         if (st && st->Scaling()) return st->GetProxy(sc, idx, riid, out);
     }
-    return vt->getBuffer(sc, idx, riid, out);
+    return g_vt[I].getBuffer(sc, idx, riid, out);
 }
 
+template <int I>
 HRESULT STDMETHODCALLTYPE HookGetDesc(IDXGISwapChain* sc, DXGI_SWAP_CHAIN_DESC* d) {
-    const HRESULT hr = FindVt(sc)->getDesc(sc, d);
+    const HRESULT hr = g_vt[I].getDesc(sc, d);
     if (SUCCEEDED(hr) && d && !InHook())
         if (SwapState* st = FindState(sc)) st->AdjustSize(d->BufferDesc.Width, d->BufferDesc.Height);
     return hr;
 }
 
+template <int I>
 HRESULT STDMETHODCALLTYPE HookGetDesc1(IDXGISwapChain1* sc, DXGI_SWAP_CHAIN_DESC1* d) {
-    const HRESULT hr = FindVt(sc)->getDesc1(sc, d);
+    const HRESULT hr = g_vt[I].getDesc1(sc, d);
     if (SUCCEEDED(hr) && d && !InHook())
         if (SwapState* st = FindState(sc)) st->AdjustSize(d->Width, d->Height);
     return hr;
 }
 
+template <int I>
 HRESULT STDMETHODCALLTYPE HookPresent(IDXGISwapChain* sc, UINT sync, UINT flags) {
-    return HandlePresent({sc, sync, flags, nullptr, FindVt(sc), false});
+    return HandlePresent({sc, sync, flags, nullptr, &g_vt[I], false});
 }
 
+template <int I>
 HRESULT STDMETHODCALLTYPE HookPresent1(IDXGISwapChain1* sc, UINT sync, UINT flags,
                                        const DXGI_PRESENT_PARAMETERS* params) {
-    return HandlePresent({sc, sync, flags, params, FindVt(sc), true});
+    return HandlePresent({sc, sync, flags, params, &g_vt[I], true});
 }
 
+template <int I>
 HRESULT STDMETHODCALLTYPE HookResizeBuffers(IDXGISwapChain* sc, UINT count, UINT w, UINT h,
                                             DXGI_FORMAT fmt, UINT flags) {
-    if (OnResize(sc, w, h)) w = h = 0; // real buffers follow the window
-    return FindVt(sc)->resize(sc, count, w, h, fmt, flags);
+    if (!InHook() && OnResize(sc, w, h)) w = h = 0; // real buffers follow the window
+    return g_vt[I].resize(sc, count, w, h, fmt, flags);
 }
 
+template <int I>
 HRESULT STDMETHODCALLTYPE HookResizeBuffers1(IDXGISwapChain3* sc, UINT count, UINT w, UINT h,
                                              DXGI_FORMAT fmt, UINT flags, const UINT* mask,
                                              IUnknown* const* queues) {
-    if (OnResize(sc, w, h)) w = h = 0;
-    return FindVt(sc)->resize1(sc, count, w, h, fmt, flags, mask, queues);
+    if (!InHook() && OnResize(sc, w, h)) w = h = 0;
+    return g_vt[I].resize1(sc, count, w, h, fmt, flags, mask, queues);
 }
+
+struct GroupHooks {
+    void* present;
+    void* present1;
+    void* resize;
+    void* resize1;
+    void* getBuffer;
+    void* getDesc;
+    void* getDesc1;
+};
+
+template <int I>
+constexpr GroupHooks MakeGroup() {
+    return {reinterpret_cast<void*>(&HookPresent<I>),       reinterpret_cast<void*>(&HookPresent1<I>),
+            reinterpret_cast<void*>(&HookResizeBuffers<I>), reinterpret_cast<void*>(&HookResizeBuffers1<I>),
+            reinterpret_cast<void*>(&HookGetBuffer<I>),     reinterpret_cast<void*>(&HookGetDesc<I>),
+            reinterpret_cast<void*>(&HookGetDesc1<I>)};
+}
+
+const GroupHooks kGroups[kMaxVtables] = {MakeGroup<0>(), MakeGroup<1>(), MakeGroup<2>(), MakeGroup<3>(),
+                                         MakeGroup<4>(), MakeGroup<5>(), MakeGroup<6>(), MakeGroup<7>()};
 
 // ---------------------------------------------------------------------------
 // Installing the hooks
 
-void WriteSlot(void** vt, int idx, void* fn) {
-    DWORD old = 0;
-    if (!VirtualProtect(&vt[idx], sizeof(void*), PAGE_READWRITE, &old)) return;
-    vt[idx] = fn;
-    VirtualProtect(&vt[idx], sizeof(void*), old, &old);
+// Every function we've detoured, so a second group that shares an
+// implementation (e.g. GetBuffer) reuses the first group's trampoline.
+struct Detour {
+    void* target;
+    void* trampoline;
+};
+std::mutex g_detourMutex;
+Detour g_detours[64];
+int g_detourCount = 0;
+
+// Detours target with hook (once) and stores the pointer that calls the
+// original in *orig before the detour goes live.
+template <typename Fn>
+bool Detour(void* target, void* hook, Fn* orig) {
+    std::lock_guard<std::mutex> lock(g_detourMutex);
+    for (int i = 0; i < g_detourCount; ++i)
+        if (g_detours[i].target == target) {
+            *orig = reinterpret_cast<Fn>(g_detours[i].trampoline);
+            return true;
+        }
+    if (g_detourCount >= 64) return false;
+    if (MH_CreateHook(target, hook, reinterpret_cast<void**>(orig)) != MH_OK) {
+        Log("Could not hook function %p", target);
+        return false;
+    }
+    if (MH_EnableHook(target) != MH_OK) {
+        MH_RemoveHook(target);
+        Log("Could not enable the hook on %p", target);
+        return false;
+    }
+    g_detours[g_detourCount++] = {target, reinterpret_cast<void*>(*orig)};
+    return true;
 }
 
 void HookSwapChain(IDXGISwapChain* sc) {
     void** vt = *reinterpret_cast<void***>(sc);
+    void* presentTarget = vt[kSlotPresent];
     const int n = g_vtCount.load();
     for (int i = 0; i < n; ++i)
-        if (g_vt[i].vt == vt) return;
+        if (g_vt[i].target == presentTarget) return;
     if (n >= kMaxVtables) return;
 
     ComPtr<IDXGISwapChain1> sc1;
@@ -869,26 +942,24 @@ void HookSwapChain(IDXGISwapChain* sc) {
     const bool has1 = SUCCEEDED(sc->QueryInterface(IID_PPV_ARGS(&sc1)));
     const bool has3 = SUCCEEDED(sc->QueryInterface(IID_PPV_ARGS(&sc3)));
 
-    // Record the originals and publish them before any slot is redirected.
+    // Fill in every trampoline before the group is published (a detour is
+    // live as soon as it's created).
     VtHooks& h = g_vt[n];
-    h.vt = vt;
-    h.present = reinterpret_cast<PresentFn>(vt[kSlotPresent]);
-    h.resize = reinterpret_cast<ResizeBuffersFn>(vt[kSlotResizeBuffers]);
-    h.getBuffer = reinterpret_cast<GetBufferFn>(vt[kSlotGetBuffer]);
-    h.getDesc = reinterpret_cast<GetDescFn>(vt[kSlotGetDesc]);
-    if (has1) h.getDesc1 = reinterpret_cast<GetDesc1Fn>(vt[kSlotGetDesc1]);
-    if (has1) h.present1 = reinterpret_cast<Present1Fn>(vt[kSlotPresent1]);
-    if (has3) h.resize1 = reinterpret_cast<ResizeBuffers1Fn>(vt[kSlotResizeBuffers1]);
+    const GroupHooks& fn = kGroups[n];
+    h.target = presentTarget;
+    bool ok = Detour(vt[kSlotGetBuffer], fn.getBuffer, &h.getBuffer);
+    ok &= Detour(vt[kSlotGetDesc], fn.getDesc, &h.getDesc);
+    ok &= Detour(vt[kSlotResizeBuffers], fn.resize, &h.resize);
+    if (has1) Detour(vt[kSlotGetDesc1], fn.getDesc1, &h.getDesc1);
+    if (has3) Detour(vt[kSlotResizeBuffers1], fn.resize1, &h.resize1);
+    if (has1) Detour(vt[kSlotPresent1], fn.present1, &h.present1);
+    ok &= Detour(presentTarget, fn.present, &h.present);
+    if (!ok) {
+        Log("Hooking the swap chain failed");
+        return;
+    }
     g_vtCount = n + 1;
-
-    WriteSlot(vt, kSlotPresent, reinterpret_cast<void*>(&HookPresent));
-    WriteSlot(vt, kSlotResizeBuffers, reinterpret_cast<void*>(&HookResizeBuffers));
-    WriteSlot(vt, kSlotGetBuffer, reinterpret_cast<void*>(&HookGetBuffer));
-    WriteSlot(vt, kSlotGetDesc, reinterpret_cast<void*>(&HookGetDesc));
-    if (has1) WriteSlot(vt, kSlotGetDesc1, reinterpret_cast<void*>(&HookGetDesc1));
-    if (has1) WriteSlot(vt, kSlotPresent1, reinterpret_cast<void*>(&HookPresent1));
-    if (has3) WriteSlot(vt, kSlotResizeBuffers1, reinterpret_cast<void*>(&HookResizeBuffers1));
-    Log("Hooked swap chain vtable %p (Present1: %s, ResizeBuffers1: %s)", static_cast<void*>(vt),
+    Log("Hooked swap chain functions (Present %p, Present1: %s, ResizeBuffers1: %s)", presentTarget,
         has1 ? "yes" : "no", has3 ? "yes" : "no");
 }
 
@@ -909,34 +980,27 @@ using CreateForCoreWindowFn = HRESULT(STDMETHODCALLTYPE*)(IDXGIFactory2*, IUnkno
 using CreateForCompositionFn = HRESULT(STDMETHODCALLTYPE*)(IDXGIFactory2*, IUnknown*, const DXGI_SWAP_CHAIN_DESC1*,
                                                            IDXGIOutput*, IDXGISwapChain1**);
 
-struct FactoryHooks {
-    void** vt = nullptr;
-    CreateSwapChainFn create = nullptr;
-    CreateForHwndFn forHwnd = nullptr;
-    CreateForCoreWindowFn forCoreWindow = nullptr;
-    CreateForCompositionFn forComposition = nullptr;
-};
-constexpr int kMaxFactoryVtables = 4;
-FactoryHooks g_fvt[kMaxFactoryVtables];
-std::atomic<int> g_fvtCount{0};
-
-const FactoryHooks* FindFactoryVt(void* obj) {
-    void** vt = *reinterpret_cast<void***>(obj);
-    const int n = g_fvtCount.load();
-    for (int i = 0; i < n; ++i)
-        if (g_fvt[i].vt == vt) return &g_fvt[i];
-    return &g_fvt[0];
-}
+CreateSwapChainFn g_origCreate = nullptr;
+CreateForHwndFn g_origForHwnd = nullptr;
+CreateForCoreWindowFn g_origForCoreWindow = nullptr;
+CreateForCompositionFn g_origForComposition = nullptr;
 
 void OnSwapChainCreated(IUnknown* deviceOrQueue, IUnknown* swapChain) {
+    if (InHook()) return; // Nitro's own probe swap chains
     RememberSwapQueue(swapChain, deviceOrQueue);
+    static std::atomic<int> logged{0};
+    if (logged.fetch_add(1) < 8) {
+        ComPtr<ID3D12CommandQueue> q;
+        Log("Game created a swap chain (%s)",
+            deviceOrQueue && SUCCEEDED(deviceOrQueue->QueryInterface(IID_PPV_ARGS(&q))) ? "Direct3D 12" : "Direct3D 10/11");
+    }
     ComPtr<IDXGISwapChain> sc;
     if (swapChain && SUCCEEDED(swapChain->QueryInterface(IID_PPV_ARGS(&sc)))) HookSwapChain(sc.Get());
 }
 
 HRESULT STDMETHODCALLTYPE HookCreateSwapChain(IDXGIFactory* f, IUnknown* dev, DXGI_SWAP_CHAIN_DESC* d,
                                               IDXGISwapChain** out) {
-    const HRESULT hr = FindFactoryVt(f)->create(f, dev, d, out);
+    const HRESULT hr = g_origCreate(f, dev, d, out);
     if (SUCCEEDED(hr) && out && *out) OnSwapChainCreated(dev, *out);
     return hr;
 }
@@ -944,7 +1008,7 @@ HRESULT STDMETHODCALLTYPE HookCreateSwapChain(IDXGIFactory* f, IUnknown* dev, DX
 HRESULT STDMETHODCALLTYPE HookCreateForHwnd(IDXGIFactory2* f, IUnknown* dev, HWND wnd, const DXGI_SWAP_CHAIN_DESC1* d,
                                             const DXGI_SWAP_CHAIN_FULLSCREEN_DESC* fs, IDXGIOutput* o,
                                             IDXGISwapChain1** out) {
-    const HRESULT hr = FindFactoryVt(f)->forHwnd(f, dev, wnd, d, fs, o, out);
+    const HRESULT hr = g_origForHwnd(f, dev, wnd, d, fs, o, out);
     if (SUCCEEDED(hr) && out && *out) OnSwapChainCreated(dev, *out);
     return hr;
 }
@@ -952,36 +1016,26 @@ HRESULT STDMETHODCALLTYPE HookCreateForHwnd(IDXGIFactory2* f, IUnknown* dev, HWN
 HRESULT STDMETHODCALLTYPE HookCreateForCoreWindow(IDXGIFactory2* f, IUnknown* dev, IUnknown* wnd,
                                                   const DXGI_SWAP_CHAIN_DESC1* d, IDXGIOutput* o,
                                                   IDXGISwapChain1** out) {
-    const HRESULT hr = FindFactoryVt(f)->forCoreWindow(f, dev, wnd, d, o, out);
+    const HRESULT hr = g_origForCoreWindow(f, dev, wnd, d, o, out);
     if (SUCCEEDED(hr) && out && *out) OnSwapChainCreated(dev, *out);
     return hr;
 }
 
 HRESULT STDMETHODCALLTYPE HookCreateForComposition(IDXGIFactory2* f, IUnknown* dev, const DXGI_SWAP_CHAIN_DESC1* d,
                                                    IDXGIOutput* o, IDXGISwapChain1** out) {
-    const HRESULT hr = FindFactoryVt(f)->forComposition(f, dev, d, o, out);
+    const HRESULT hr = g_origForComposition(f, dev, d, o, out);
     if (SUCCEEDED(hr) && out && *out) OnSwapChainCreated(dev, *out);
     return hr;
 }
 
 void HookFactory(IDXGIFactory2* factory) {
+    if (g_origForHwnd) return;
     void** vt = *reinterpret_cast<void***>(factory);
-    const int n = g_fvtCount.load();
-    for (int i = 0; i < n; ++i)
-        if (g_fvt[i].vt == vt) return;
-    if (n >= kMaxFactoryVtables) return;
-    FactoryHooks& h = g_fvt[n];
-    h.vt = vt;
-    h.create = reinterpret_cast<CreateSwapChainFn>(vt[kSlotCreateSwapChain]);
-    h.forHwnd = reinterpret_cast<CreateForHwndFn>(vt[kSlotCreateForHwnd]);
-    h.forCoreWindow = reinterpret_cast<CreateForCoreWindowFn>(vt[kSlotCreateForCoreWindow]);
-    h.forComposition = reinterpret_cast<CreateForCompositionFn>(vt[kSlotCreateForComposition]);
-    g_fvtCount = n + 1;
-    WriteSlot(vt, kSlotCreateSwapChain, reinterpret_cast<void*>(&HookCreateSwapChain));
-    WriteSlot(vt, kSlotCreateForHwnd, reinterpret_cast<void*>(&HookCreateForHwnd));
-    WriteSlot(vt, kSlotCreateForCoreWindow, reinterpret_cast<void*>(&HookCreateForCoreWindow));
-    WriteSlot(vt, kSlotCreateForComposition, reinterpret_cast<void*>(&HookCreateForComposition));
-    Log("Hooked DXGI factory vtable %p", static_cast<void*>(vt));
+    Detour(vt[kSlotCreateSwapChain], reinterpret_cast<void*>(&HookCreateSwapChain), &g_origCreate);
+    Detour(vt[kSlotCreateForCoreWindow], reinterpret_cast<void*>(&HookCreateForCoreWindow), &g_origForCoreWindow);
+    Detour(vt[kSlotCreateForComposition], reinterpret_cast<void*>(&HookCreateForComposition), &g_origForComposition);
+    Detour(vt[kSlotCreateForHwnd], reinterpret_cast<void*>(&HookCreateForHwnd), &g_origForHwnd);
+    Log("Hooked DXGI factory (CreateSwapChain: %s)", g_origCreate && g_origForHwnd ? "yes" : "partly");
 }
 
 void HookFromDevice(IDXGIFactory2* factory, IUnknown* deviceOrQueue, bool legacyToo) {
@@ -1076,10 +1130,9 @@ void InstallDxgiHooks() {
                 if (SUCCEEDED(d12->CreateCommandQueue(&qd, IID_PPV_ARGS(&q)))) {
                     HookFromDevice(factory.Get(), q.Get(), false);
                     void** qvt = *reinterpret_cast<void***>(q.Get());
-                    if (!g_origExecute) {
-                        g_origExecute = reinterpret_cast<ExecuteCommandListsFn>(qvt[kSlotExecuteCommandLists]);
-                        WriteSlot(qvt, kSlotExecuteCommandLists, reinterpret_cast<void*>(&HookExecuteCommandLists));
-                    }
+                    if (!g_origExecute)
+                        Detour(qvt[kSlotExecuteCommandLists], reinterpret_cast<void*>(&HookExecuteCommandLists),
+                               &g_origExecute);
                 }
             }
         }
@@ -1087,7 +1140,7 @@ void InstallDxgiHooks() {
 
     // Last, so Nitro's own probe swap chains above don't go through it.
     HookFactory(factory.Get());
-    Log("%d swap chain vtable(s) hooked", g_vtCount.load());
+    Log("%d swap chain implementation(s) hooked", g_vtCount.load());
 }
 
 } // namespace lsfgi
