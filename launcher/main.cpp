@@ -781,11 +781,78 @@ void Uninstall() {
     if (changed) LogOk(L"Removed Nitro from " + gameDir); else Log(L"Nothing to remove for " + gameDir);
 }
 
+constexpr UINT kMsgGameExitedEarly = WM_APP + 1;
+
+// A game that closes within a few seconds of starting has usually handed over
+// to Steam or its own launcher, and the new process doesn't have Nitro in it.
+void WatchForEarlyExit(HANDLE process) {
+    if (!process) return;
+    std::thread([process] {
+        const ULONGLONG start = GetTickCount64();
+        if (WaitForSingleObject(process, 20000) == WAIT_OBJECT_0)
+            PostMessageW(g_wnd, kMsgGameExitedEarly, static_cast<WPARAM>((GetTickCount64() - start) / 1000), 0);
+        CloseHandle(process);
+    }).detach();
+}
+
+// Steam games started outside Steam usually quit and restart through Steam,
+// and that new process doesn't have Nitro in it. Steam tells a game it was
+// started by Steam through these environment variables, so Nitro sets them
+// for the game it launches.
+std::wstring SteamAppIdFor(const std::wstring& exe) {
+    const std::wstring l = Lower(exe);
+    const std::wstring marker = L"\\steamapps\\common\\";
+    const size_t at = l.find(marker);
+    if (at == std::wstring::npos) return {};
+    const std::wstring steamapps = exe.substr(0, at) + L"\\steamapps";
+    const size_t dirStart = at + marker.size();
+    const std::wstring dir = l.substr(dirStart, l.find(L'\\', dirStart) - dirStart);
+    WIN32_FIND_DATAW fd;
+    HANDLE h = FindFirstFileW((steamapps + L"\\appmanifest_*.acf").c_str(), &fd);
+    if (h == INVALID_HANDLE_VALUE) return {};
+    std::wstring found;
+    auto value = [](const std::string& text, const char* key) -> std::string {
+        const std::string needle = std::string("\"") + key + "\"";
+        const size_t k = text.find(needle);
+        if (k == std::string::npos) return {};
+        const size_t a = text.find('"', k + needle.size());
+        const size_t b = a == std::string::npos ? a : text.find('"', a + 1);
+        return b == std::string::npos ? std::string() : text.substr(a + 1, b - a - 1);
+    };
+    do {
+        std::ifstream f(steamapps + L"\\" + fd.cFileName, std::ios::binary);
+        const std::string text((std::istreambuf_iterator<char>(f)), std::istreambuf_iterator<char>());
+        if (Lower(W(value(text, "installdir").c_str())) == dir) {
+            found = W(value(text, "appid").c_str());
+            break;
+        }
+    } while (FindNextFileW(h, &fd));
+    FindClose(h);
+    return found;
+}
+
+struct SteamLaunchEnv {
+    explicit SteamLaunchEnv(const std::wstring& appId) : set(!appId.empty()) {
+        if (!set) return;
+        SetEnvironmentVariableW(L"SteamAppId", appId.c_str());
+        SetEnvironmentVariableW(L"SteamGameId", appId.c_str());
+    }
+    ~SteamLaunchEnv() {
+        if (!set) return;
+        SetEnvironmentVariableW(L"SteamAppId", nullptr);
+        SetEnvironmentVariableW(L"SteamGameId", nullptr);
+    }
+    bool set;
+};
+
 void Launch() {
     std::wstring exe;
     Api api{};
     if (!Preflight(exe, api)) return;
     SaveUi(); // the injected DLL / Vulkan layer read Nitro.ini from the Nitro folder
+    const std::wstring appId = SteamAppIdFor(exe);
+    SteamLaunchEnv steamEnv(appId); // inherited by the game (and the 32-bit helper)
+    if (!appId.empty()) Log(L"Steam game (app " + appId + L"): starting it directly so Nitro stays loaded. Steam needs to be running.");
 
     std::wstring cmd = L"\"" + exe + L"\"";
     const std::wstring args = Trim(W(ui.args));
@@ -849,6 +916,7 @@ void Launch() {
         injected = code == kInjectOk;
     } else {
         const LaunchResult r = LaunchInjected(exe, args, g_dir + L"\\" + kHookDll);
+        WatchForEarlyExit(r.process);
         if (!r.started) {
             LogErr(L"Could not start the game: " + ErrorText(r.error));
             if (r.error == ERROR_ELEVATION_REQUIRED) Log(L"The game needs admin rights - run Nitro as administrator.");
@@ -859,7 +927,8 @@ void Launch() {
 
     if (injected) {
         LogOk(std::wstring(L"Game started with Nitro (") + ApiName(api) + L"). Log: " + g_dir + L"\\Nitro.log");
-        Log(L"If the game restarts itself through Steam, use 'Install into game' instead.");
+        Log(L"If the game closes and reopens through Steam (or a launcher), Nitro won't be in it: "
+            L"use 'Install into game' instead.");
     } else {
         LogErr(L"Game started, but injection failed (anti-cheat or permissions?). "
                L"Try 'Install into game' instead.");
@@ -1779,6 +1848,11 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         mm->ptMinTrackSize.y = static_cast<LONG>(900 * g_scale);
         return 0;
     }
+    case kMsgGameExitedEarly:
+        LogErr(L"The game closed " + std::to_wstring(wp) +
+               L" s after starting - it most likely restarted through Steam or its own launcher, without Nitro. "
+               L"Use 'Install into game' and start it the normal way instead.");
+        return 0;
     case WM_SYSCOMMAND:
         if ((wp & 0xfff0) == SC_KEYMENU) return 0; // no Alt menu beep
         break;

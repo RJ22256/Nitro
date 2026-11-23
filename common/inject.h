@@ -13,6 +13,7 @@ struct LaunchResult {
     bool started = false;
     bool injected = false;
     DWORD error = 0; // GetLastError() when the game could not be started
+    HANDLE process = nullptr; // the game process (caller closes it), when started
 };
 
 LaunchResult LaunchInjected(const std::wstring& exe, const std::wstring& args, const std::wstring& dllPath);

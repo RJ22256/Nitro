@@ -26,6 +26,7 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, LPWSTR, int) {
 
     const lsfgi::LaunchResult r = lsfgi::LaunchInjected(argv[1], args, argv[2]);
     LocalFree(argv);
+    if (r.process) CloseHandle(r.process);
     if (!r.started) {
         SetLastError(r.error);
         return static_cast<int>(lsfgi::kInjectNotStarted);

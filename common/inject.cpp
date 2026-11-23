@@ -79,7 +79,7 @@ LaunchResult LaunchInjected(const std::wstring& exe, const std::wstring& args, c
     if (remote) VirtualFreeEx(pi.hProcess, remote, 0, MEM_RELEASE);
     ResumeThread(pi.hThread);
     CloseHandle(pi.hThread);
-    CloseHandle(pi.hProcess);
+    result.process = pi.hProcess;
     return result;
 }
 
