@@ -62,6 +62,7 @@ void LoadConfig(const std::wstring& ini, Config& cfg) {
     cfg.shaderOffset = ReadInt(ini, L"ShaderOffset", cfg.shaderOffset);
     cfg.probeD3D12 = ReadInt(ini, L"ProbeD3D12", cfg.probeD3D12) != 0;
     cfg.api = ReadString(ini, L"Api", cfg.api.c_str());
+    cfg.gameExe = ReadString(ini, L"GameExe", L"");
 }
 
 bool SaveConfig(const std::wstring& ini, const Config& cfg) {
@@ -92,6 +93,7 @@ bool SaveConfig(const std::wstring& ini, const Config& cfg) {
     ok &= Write(ini, L"ShaderOffset", std::to_wstring(cfg.shaderOffset));
     ok &= Write(ini, L"ProbeD3D12", cfg.probeD3D12 ? L"1" : L"0");
     ok &= Write(ini, L"Api", cfg.api);
+    if (!cfg.gameExe.empty()) ok &= Write(ini, L"GameExe", cfg.gameExe);
     return ok;
 }
 

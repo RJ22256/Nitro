@@ -26,6 +26,7 @@ struct Config {
     int shaderOffset = -1;       // -1 auto-detect
     bool probeD3D12 = true;      // create a throwaway D3D12 swap chain to find its vtable
     std::wstring api = L"auto"; // auto, dxgi (DX10/11/12), d3d9, opengl, all
+    std::wstring gameExe;       // file name of the game's exe (written by Install); empty = any
 };
 
 constexpr wchar_t kConfigFileName[] = L"Nitro.ini";

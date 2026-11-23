@@ -1,6 +1,7 @@
 #include "runtime.h"
 
 #include <cwchar>
+#include <cwctype>
 
 #include "log.h"
 
@@ -15,13 +16,33 @@ bool LoadRuntime(HMODULE self, const wchar_t* logName) {
     auto& g = G();
     g.self = self;
     g.dir = ModuleDirectory(self);
-    LogInit(g.dir + L"\\" + logName);
+    LoadConfig(g.dir + L"\\" + kConfigFileName, g.cfg);
 
     wchar_t exe[MAX_PATH] = {};
     GetModuleFileNameW(nullptr, exe, MAX_PATH);
-    Log("Nitro loaded into %s", Narrow(exe).c_str());
+    const wchar_t* slash = wcsrchr(exe, L'\\');
+    const std::wstring exeName = slash ? slash + 1 : exe;
+    std::wstring lower = exeName;
+    for (auto& c : lower) c = static_cast<wchar_t>(towlower(c));
 
-    LoadConfig(g.dir + L"\\" + kConfigFileName, g.cfg);
+    // Games often start helper programs from their own folder (crash
+    // reporters, video encoders, launchers), and those load the installed
+    // dxgi.dll too. Leave obvious helpers alone, and give any process that
+    // isn't the game its own log so it can't overwrite the game's.
+    const bool isGame = g.cfg.gameExe.empty() || _wcsicmp(g.cfg.gameExe.c_str(), exeName.c_str()) == 0;
+    if (!isGame) {
+        for (const wchar_t* helper : {L"crs-", L"crash", L"report", L"unins", L"setup", L"redist", L"cefprocess",
+                                      L"webhelper", L"easyanticheat", L"battleye"})
+            if (lower.find(helper) != std::wstring::npos) return false;
+    }
+    std::wstring log = g.dir + L"\\" + logName;
+    if (!isGame) {
+        const size_t dot = log.rfind(L'.');
+        const std::wstring stem = exeName.substr(0, exeName.rfind(L'.'));
+        log = log.substr(0, dot) + L"-" + stem + log.substr(dot);
+    }
+    LogInit(log);
+    Log("Nitro loaded into %s", Narrow(exe).c_str());
     if (g.cfg.losslessDll.empty()) g.cfg.losslessDll = g.dir + L"\\Lossless.dll";
     // Prefer the imported shader pack; fall back to Lossless.dll.
     std::wstring source = g.cfg.losslessDll;

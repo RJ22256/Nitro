@@ -751,6 +751,7 @@ void Install() {
     }
     Config c = ConfigFromUi();
     c.api = HookApiSetting(api);
+    c.gameExe = exe.substr(exe.find_last_of(L"\\/") + 1);
     if (!SaveConfig(gameDir + L"\\" + kConfigFileName, c)) {
         Log(L"Could not write the settings file into the game folder.");
         return;
