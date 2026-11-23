@@ -42,6 +42,28 @@ jobs:
           Copy-Item fonts/* "$pkg/Fonts"
           Compress-Archive -Path $pkg -DestinationPath package/Nitro-x64.zip -Force
 
+      - name: Build installer
+        shell: pwsh
+        run: |
+          $iscc = "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe"
+          if (-not (Test-Path $iscc)) {
+            choco install innosetup --no-progress -y | Out-Null
+          }
+          $ver = "0.2.0"
+          $ref = "${{ github.event.release.tag_name || github.ref_name }}"
+          if ($ref -match '^v(\d+(\.\d+){0,3})') { $ver = $ref.Substring(1) }
+          $nums = ([regex]::Match($ver, '^\d+(\.\d+){0,3}').Value).Split('.')
+          while ($nums.Count -lt 4) { $nums += '0' }
+          $numeric = ($nums[0..3] -join '.')
+          & $iscc /Qp "/DAppVersion=$ver" "/DNumericVersion=$numeric" installer/Nitro.iss
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          Get-Item package/Nitro-Setup.exe
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: Nitro-Setup
+          path: package/Nitro-Setup.exe
+
       - uses: actions/upload-artifact@v4
         with:
           name: Nitro-x64
@@ -56,7 +78,7 @@ jobs:
           $tag = "${{ github.event.release.tag_name || github.ref_name }}"
           gh release view $tag 2>$null
           if ($LASTEXITCODE -eq 0) {
-            gh release upload $tag package/Nitro-x64.zip --clobber
+            gh release upload $tag package/Nitro-Setup.exe package/Nitro-x64.zip --clobber
           } else {
-            gh release create $tag package/Nitro-x64.zip --title "Nitro $tag" --notes-file .github/RELEASE_NOTES.md --prerelease
+            gh release create $tag package/Nitro-Setup.exe package/Nitro-x64.zip --title "Nitro $tag" --notes-file .github/RELEASE_NOTES.md --prerelease
           }

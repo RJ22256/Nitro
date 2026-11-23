@@ -10,6 +10,13 @@ if not exist "%~dp0build\dist\Fonts" mkdir "%~dp0build\dist\Fonts"
 copy /y "%~dp0fonts\*" "%~dp0build\dist\Fonts\" >nul
 echo.
 echo Done. Files are in "%~dp0build\dist".
+
+rem Optional: build Nitro-Setup.exe if Inno Setup 6 is installed
+set "ISCC=%ProgramFiles(x86)%\Inno Setup 6\ISCC.exe"
+if exist "%ISCC%" (
+  "%ISCC%" /Qp "/DSourceDir=%~dp0build\dist" "%~dp0installer\Nitro.iss" || goto :error
+  echo Installer: "%~dp0package\Nitro-Setup.exe"
+)
 goto :eof
 :error
 echo Build failed.

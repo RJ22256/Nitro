@@ -48,8 +48,8 @@ Powered by the frame-generation algorithm from your own copy of [Lossless Scalin
 
 ## 🚀 How to use
 
-1. Download **`Nitro-x64.zip`** from [Releases](https://github.com/RJ22256/Nitro/releases) and unzip it anywhere.
-2. Run **`Nitro.exe`**. The first time, a short **setup** finds Lossless Scaling in your Steam libraries (or you can browse to it) and imports its frame-gen shaders. After that they're built into Nitro (`Nitro.shaders`, next to `Nitro.exe`), so you never have to find `Lossless.dll` again.
+1. Download **`Nitro-Setup.exe`** from [Releases](https://github.com/RJ22256/Nitro/releases) and run it. It installs for your user only (no admin prompt) and adds Start menu and optional desktop shortcuts. Prefer a portable copy? Download **`Nitro-x64.zip`** instead and unzip it anywhere you can write to.
+2. Run **Nitro**. The first time, a short **setup** finds Lossless Scaling in your Steam libraries (or you can browse to it) and imports its frame-gen shaders. After that they're built into Nitro (`Nitro.shaders`, next to `Nitro.exe`), so you never have to find `Lossless.dll` again.
 3. Open the **Library** and click your game, or **Browse...** to the game's `.exe` on the **Game** tab.
    For Unreal Engine games, pick `...\Binaries\Win64\*-Shipping.exe` (Nitro suggests it if it finds one; the Library picks it for you).
 4. Choose a **mode**:
@@ -158,6 +158,7 @@ Check **`Nitro.log`** first. It's written next to the hook and records whether t
 | No log file at all | The hook never loaded. Usual causes: wrong exe (Unreal stub), a Vulkan/OpenGL game, or anti-cheat. |
 | FSR Upscale does nothing | It needs a DirectX 11/12 game running borderless/windowed at a lower resolution than the window, and a game restart after switching it on. The log says *FSR 1: game renders WxH, upscaling to WxH* when it's active. |
 | Library is missing a game | Only Steam, Epic Games and GOG Galaxy installs are listed. Use **Browse...** for others. |
+| Uninstalling Nitro | Use **Remove from game** for each game first, then uninstall from Windows Settings → Apps. The uninstaller removes Nitro's settings, imported shaders and Vulkan layer registration, but doesn't touch game folders. |
 | *Access denied* when installing | The game is in a protected folder, so run Nitro as administrator. |
 
 Still stuck? [Open an issue](https://github.com/RJ22256/Nitro/issues) and attach `Nitro.log`.
@@ -197,7 +198,7 @@ Requires **Visual Studio 2022** ("Desktop development with C++") and **CMake**.
 build.bat
 ```
 
-`build.bat` builds both the 64-bit and the 32-bit parts. The output is in `build\dist`: `Nitro.exe`, `NitroHook.dll`, `NitroVk.dll`, `NitroVk.json`, plus `NitroHook32.dll`, `NitroVk32.dll`, `NitroVk32.json`, `NitroInject32.exe` and the `Fonts` folder. CMake downloads MinHook, the Vulkan headers, Dear ImGui and AMD FidelityFX FSR automatically. Every push is also built by GitHub Actions, and pushing a `v*` tag publishes a release with `Nitro-x64.zip` attached.
+`build.bat` builds both the 64-bit and the 32-bit parts, and `package\Nitro-Setup.exe` too if [Inno Setup 6](https://jrsoftware.org/isinfo.php) is installed. The output is in `build\dist`: `Nitro.exe`, `NitroHook.dll`, `NitroVk.dll`, `NitroVk.json`, plus `NitroHook32.dll`, `NitroVk32.dll`, `NitroVk32.json`, `NitroInject32.exe` and the `Fonts` folder. CMake downloads MinHook, the Vulkan headers, Dear ImGui and AMD FidelityFX FSR automatically. Every push is also built by GitHub Actions, and pushing a `v*` tag publishes a release with `Nitro-Setup.exe` and `Nitro-x64.zip` attached.
 
 ## 📋 Limitations
 
