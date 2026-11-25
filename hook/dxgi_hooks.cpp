@@ -911,7 +911,7 @@ SwapState* FindState(IDXGISwapChain* sc) {
 
 HRESULT HandlePresent(const PresentCall& call) {
     static bool loggedCall = false;
-    if (!loggedCall && !InHook()) {
+    if (!loggedCall && !InHook() && !(call.flags & DXGI_PRESENT_TEST)) {
         loggedCall = true;
         Log("Game presents with sync interval %u, flags 0x%X%s", call.sync, call.flags, call.present1 ? " (Present1)" : "");
     }
