@@ -1,6 +1,8 @@
 #include "config.h"
 
+#include <algorithm>
 #include <cwchar>
+#include <string>
 #include <vector>
 
 namespace lsfgi {
@@ -62,6 +64,8 @@ void LoadConfig(const std::wstring& ini, Config& cfg) {
     cfg.shaderOffset = ReadInt(ini, L"ShaderOffset", cfg.shaderOffset);
     cfg.probeD3D12 = ReadInt(ini, L"ProbeD3D12", cfg.probeD3D12) != 0;
     cfg.diagnostics = ReadInt(ini, L"Diagnostics", 0) != 0;
+    cfg.fpsLimitMode = std::clamp(ReadInt(ini, L"FpsLimitMode", cfg.fpsLimitMode), 0, 2);
+    cfg.fpsLimit = std::clamp(ReadInt(ini, L"FpsLimit", cfg.fpsLimit), 10, 500);
     cfg.api = ReadString(ini, L"Api", cfg.api.c_str());
     cfg.gameExe = ReadString(ini, L"GameExe", L"");
 }
@@ -94,6 +98,8 @@ bool SaveConfig(const std::wstring& ini, const Config& cfg) {
     ok &= Write(ini, L"ShaderOffset", std::to_wstring(cfg.shaderOffset));
     ok &= Write(ini, L"ProbeD3D12", cfg.probeD3D12 ? L"1" : L"0");
     if (cfg.diagnostics) ok &= Write(ini, L"Diagnostics", L"1");
+    ok &= Write(ini, L"FpsLimitMode", std::to_wstring(cfg.fpsLimitMode));
+    ok &= Write(ini, L"FpsLimit", std::to_wstring(cfg.fpsLimit));
     ok &= Write(ini, L"Api", cfg.api);
     if (!cfg.gameExe.empty()) ok &= Write(ini, L"GameExe", cfg.gameExe);
     return ok;

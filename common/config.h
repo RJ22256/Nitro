@@ -25,6 +25,8 @@ struct Config {
     int menuKey = VK_INSERT;     // in-game: open/close the Nitro menu
     int shaderOffset = -1;       // -1 auto-detect
     bool probeD3D12 = true;      // create a throwaway D3D12 swap chain to find its vtable
+    int fpsLimitMode = 0;        // 0 off, 1 auto (refresh / multiplier), 2 custom
+    int fpsLimit = 60;           // custom cap for the game's real frames
     bool diagnostics = false;    // D3D12 DRED: log what the GPU was doing if the device is removed
     std::wstring api = L"auto"; // auto, dxgi (DX10/11/12), d3d9, opengl, all
     std::wstring gameExe;       // file name of the game's exe (written by Install); empty = any

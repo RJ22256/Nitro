@@ -65,6 +65,8 @@ struct UiState {
     int api = 0; // 0 auto, 1 DXGI, 2 D3D9, 3 OpenGL, 4 Vulkan
     int fsr = 0; // 0 off, 1 sharpen, 2 upscale
     int sharpPct = 60;
+    int fpsLimitMode = 0; // 0 off, 1 auto, 2 custom
+    int fpsLimit = 60;
     int view = 0; // 0 game setup, 1 library
     std::string exeInfo = "Choose the game's .exe file.";
     std::string exeHint;
@@ -519,6 +521,8 @@ Config ConfigFromUi() {
     c.hdr = ui.hdr == 1 ? 1 : (ui.hdr == 2 ? 0 : -1);
     c.fsrMode = ui.fsr;
     c.fsrSharpness = static_cast<float>(ui.sharpPct) / 100.0f;
+    c.fpsLimitMode = ui.fpsLimitMode;
+    c.fpsLimit = ui.fpsLimit;
     c.api = L"auto";
     return c;
 }
@@ -549,6 +553,8 @@ void LoadUi() {
     ui.hdr = c.hdr < 0 ? 0 : (c.hdr ? 1 : 2);
     ui.fsr = c.fsrMode;
     ui.sharpPct = static_cast<int>(c.fsrSharpness * 100.0f + 0.5f);
+    ui.fpsLimitMode = c.fpsLimitMode;
+    ui.fpsLimit = c.fpsLimit;
     ui.view = static_cast<int>(GetPrivateProfileIntW(L"Launcher", L"View", 0, IniPath().c_str())) == 1 ? 1 : 0;
 }
 
@@ -1746,6 +1752,22 @@ void DrawUi() {
             const char* items[] = {"Auto-detect", "DirectX 10 / 11 / 12", "DirectX 9", "OpenGL", "Vulkan"};
             changed |= ImGui::Combo("##api", &ui.api, items, 5);
         }
+        nitro_ui::RowLabel("FPS limit");
+        {
+            const bool custom = ui.fpsLimitMode == 2;
+            const float cw = custom ? 110 * s : 200 * s, sw = 150 * s;
+            nitro_ui::SameLineRight(custom ? cw + sw + ImGui::GetStyle().ItemSpacing.x : cw);
+            ImGui::SetNextItemWidth(cw);
+            const char* items[] = {"Off", "Auto (refresh \xC3\xB7 multiplier)", "Custom"};
+            const char* shortItems[] = {"Off", "Auto", "Custom"};
+            changed |= ImGui::Combo("##fpslimit", &ui.fpsLimitMode, custom ? shortItems : items, 3);
+            if (custom) {
+                ImGui::SameLine();
+                ImGui::SetNextItemWidth(sw);
+                ImGui::SliderInt("##fpscap", &ui.fpsLimit, 20, 360, "%d fps");
+                if (ImGui::IsItemDeactivatedAfterEdit()) changed = true;
+            }
+        }
         nitro_ui::RowLabel("AMD FSR 1");
         {
             const float cw = 200 * s;
@@ -1814,12 +1836,12 @@ void DrawUi() {
         ImGui::PushTextWrapPos(0);
         if (ui.dynamic)
             ImGui::TextColored(nitro_ui::kMuted,
-                               "Dynamic mode needs no FPS cap: Nitro tops up whatever the game renders to your "
-                               "monitor's refresh rate.");
+                               "Dynamic mode needs no FPS limit: Nitro tops up whatever the game renders to your "
+                               "monitor's refresh rate. Use Custom to hold the game to a steady rate.");
         else
             ImGui::TextColored(nitro_ui::kMuted,
-                               "Cap the game at refresh rate \xC3\xB7 multiplier for the smoothest result "
-                               "(e.g. 60 FPS on 240 Hz at 4x).");
+                               "Set FPS limit to Auto for the smoothest result: it caps the game at refresh rate "
+                               "\xC3\xB7 multiplier (e.g. 60 FPS on 240 Hz at 4x).");
         ImGui::PopTextWrapPos();
         ImGui::PopFont();
     }
@@ -1842,7 +1864,7 @@ void DrawUi() {
     ImGui::Spacing();
 
     // ---- Log
-    DrawLog((std::max)(90 * s, ImGui::GetContentRegionAvail().y - footer));
+    DrawLog((std::max)(70 * s, ImGui::GetContentRegionAvail().y - footer));
     DrawFooter();
 
     if (changed) SaveUi();

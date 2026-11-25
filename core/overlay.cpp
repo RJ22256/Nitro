@@ -280,6 +280,27 @@ void BuildMenu() {
         }
     }
 
+    // Frame limiter for the game's real frames (applies instantly).
+    nitro_ui::RowLabel("FPS limit");
+    {
+        const bool custom = g.cfg.fpsLimitMode == 2;
+        const float cw = 110 * s, sw = custom ? 120 * s : 0.0f;
+        nitro_ui::SameLineRight(cw + (custom ? sw + ImGui::GetStyle().ItemSpacing.x : 0.0f));
+        ImGui::SetNextItemWidth(cw);
+        const char* items[] = {"Off", "Auto", "Custom"};
+        ImGui::Combo("##fpslimit", &g.cfg.fpsLimitMode, items, 3);
+        if (custom) {
+            ImGui::SameLine();
+            ImGui::SetNextItemWidth(sw);
+            ImGui::SliderInt("##fpscap", &g.cfg.fpsLimit, 20, 360, "%d fps");
+        }
+    }
+    if (g.cfg.fpsLimitMode == 1) {
+        ImGui::PushFont(g_fonts.caption);
+        ImGui::TextColored(nitro_ui::kMuted, "Auto: game capped at %.0f fps (refresh \xC3\xB7 multiplier)", FrameRateCap());
+        ImGui::PopFont();
+    }
+
     // FSR 1. Off <-> Sharpen switches live; Upscale changes the swap chain
     // sizes, so it only takes effect the next time the game starts.
     nitro_ui::RowLabel("AMD FSR 1");

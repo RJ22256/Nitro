@@ -215,6 +215,7 @@ HRESULT Handle(IDirect3DDevice9* dev, const std::function<HRESULT(IDirect3DSurfa
     if (InHook()) return present();
     InHook() = true;
     PollHotkeys();
+    LimitFrameRate();
     const HRESULT hr = StateFor(dev)->Present(dev, getBB, present);
     InHook() = false;
     return hr;

@@ -34,7 +34,8 @@ Powered by the frame-generation algorithm from your own copy of [Lossless Scalin
 - **Detects the game's graphics API automatically**, or you can pick it yourself
 - **Runs inside the game**: no window capture, no borderless-window requirement, no overlay app running alongside
 - **Two ways to load it:** install it once (works with Steam launches), or launch the game with Nitro injected
-- **In-game menu** (<kbd>Insert</kbd>): change frame gen, the multiplier, flow scale, performance mode, VSync pacing, HDR and FSR live, see rendered and on-screen FPS, and save the settings as your default
+- **In-game menu** (<kbd>Insert</kbd>): change frame gen, the multiplier, flow scale, performance mode, VSync pacing, HDR, the FPS limit and FSR live
+- **Built-in FPS limiter** for the game's real frames: **Auto** caps at refresh rate ÷ multiplier (e.g. 60 FPS on 240 Hz at 4x) for even frame pacing, or pick any **Custom** cap, see rendered and on-screen FPS, and save the settings as your default
 - **Live hotkeys:** <kbd>End</kbd> toggles frame gen, <kbd>Home</kbd> cycles 2x → 3x → 4x
 - **Quality & performance modes**, adjustable flow scale, HDR support
 - **Leaves the game's rendering state untouched:** each API gets its own path (see [How it works](#-how-it-works))
@@ -129,6 +130,8 @@ FlowScale=1.00        ; 0.25-1.00
 PerformanceMode=0
 Dynamic=0             ; 1 = top up to the refresh rate (Multiplier becomes the maximum)
 HDR=-1                ; -1 auto, 0 off, 1 on
+FpsLimitMode=0        ; 0 off, 1 auto (refresh / multiplier), 2 custom
+FpsLimit=60           ; custom cap for the game's real frames
 FSR=0                 ; 0 off, 1 sharpen, 2 upscale (DX11/12)
 FSRSharpness=0.60     ; 0-1
 VSyncPacing=1

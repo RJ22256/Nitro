@@ -327,6 +327,7 @@ BOOL HandleSwap(HDC dc, SwapFn orig) {
 
     InHook() = true;
     PollHotkeys();
+    LimitFrameRate();
     GLState* state = nullptr;
     {
         std::lock_guard<std::mutex> lock(g_mutex);

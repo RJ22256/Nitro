@@ -425,6 +425,15 @@ bool SwapState::Init(IDXGISwapChain* sc) {
         d3d12_ = true;
         deviceKey_ = queue_.Get();
         Log("Attached to a D3D12 swap chain (via D3D11On12)");
+        {
+            DXGI_SWAP_CHAIN_DESC d{};
+            if (SUCCEEDED(FindVt(sc).getDesc(sc, &d)))
+                Log("Swap chain: %u buffers, swap effect %d, flags 0x%X, %s", d.BufferCount,
+                    static_cast<int>(d.SwapEffect), d.Flags, d.Windowed ? "windowed/borderless" : "exclusive fullscreen");
+        }
+        if (GetModuleHandleW(L"sl.pcl.dll") || GetModuleHandleW(L"sl.reflex.dll"))
+            Log("Note: NVIDIA Reflex (Streamline) is loaded. If the game crashes with frame generation on, set "
+                "Reflex to Off in the game's settings.");
         // Game frame generation on top of Nitro's makes two presenters fight
         // over the same swap chain.
         if (GetModuleHandleW(L"nvngx_dlssg.dll"))
@@ -901,9 +910,15 @@ SwapState* FindState(IDXGISwapChain* sc) {
 }
 
 HRESULT HandlePresent(const PresentCall& call) {
+    static bool loggedCall = false;
+    if (!loggedCall && !InHook()) {
+        loggedCall = true;
+        Log("Game presents with sync interval %u, flags 0x%X%s", call.sync, call.flags, call.present1 ? " (Present1)" : "");
+    }
     if (InHook() || (call.flags & DXGI_PRESENT_TEST)) return call.Real(call.sync, call.flags);
     InHook() = true;
     PollHotkeys();
+    LimitFrameRate();
     SwapState* state = StateFor(call.sc);
     const HRESULT hr = state->Present(call);
     InHook() = false;

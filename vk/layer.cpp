@@ -728,6 +728,7 @@ VKAPI_ATTR void VKAPI_CALL Nitro_DestroySwapchainKHR(VkDevice device, VkSwapchai
 }
 
 VKAPI_ATTR VkResult VKAPI_CALL Nitro_QueuePresentKHR(VkQueue queue, const VkPresentInfoKHR* info) {
+    if (g_enabled && !InHook()) LimitFrameRate(); // before taking the lock, so waiting blocks nobody else
     std::unique_lock<std::mutex> lock(g_mutex);
     DeviceData* d = FindDevice(queue);
     if (!d) return VK_ERROR_DEVICE_LOST;

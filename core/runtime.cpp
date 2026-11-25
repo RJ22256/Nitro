@@ -217,6 +217,64 @@ FramePlan PlanFrame(HWND window) {
     return plan;
 }
 
+float FrameRateCap() {
+    auto& g = G();
+    if (g.cfg.fpsLimitMode == 2) return static_cast<float>(g.cfg.fpsLimit);
+    if (g.cfg.fpsLimitMode == 1) {
+        // Auto: real frames at refresh / multiplier, so every refresh gets a
+        // new frame (real or generated) at an even pace.
+        const float hz = g.refreshHz > 0.0f ? g.refreshHz : RefreshRate(nullptr);
+        const int mult = g.fgEnabled ? g.multiplier.load() : 1;
+        return hz / static_cast<float>(mult < 1 ? 1 : mult);
+    }
+    return 0.0f;
+}
+
+namespace {
+
+// Sleeps until the given time: a high-resolution timer for most of the wait,
+// then a short spin for the last half millisecond.
+void WaitUntil(double target) {
+    static HANDLE timer = CreateWaitableTimerExW(nullptr, nullptr, CREATE_WAITABLE_TIMER_HIGH_RESOLUTION,
+                                                 TIMER_ALL_ACCESS);
+    double now = Now();
+    const double sleepFor = target - now - 0.0005;
+    if (sleepFor > 0.0) {
+        if (timer) {
+            LARGE_INTEGER due;
+            due.QuadPart = -static_cast<LONGLONG>(sleepFor * 1e7); // 100 ns units, relative
+            if (SetWaitableTimer(timer, &due, 0, nullptr, nullptr, FALSE)) WaitForSingleObject(timer, INFINITE);
+        } else {
+            Sleep(static_cast<DWORD>(sleepFor * 1000.0));
+        }
+    }
+    while (Now() < target) YieldProcessor();
+}
+
+} // namespace
+
+float LimitFrameRate() {
+    static double next = 0.0;
+    const float fps = FrameRateCap();
+    if (fps <= 1.0f) {
+        next = 0.0;
+        return 0.0f;
+    }
+    const double interval = 1.0 / fps;
+    double now = Now();
+    if (next <= 0.0 || now - next > interval * 4.0) { // first frame, or after a hitch / loading
+        next = now + interval;
+        return fps;
+    }
+    if (now < next) {
+        WaitUntil(next);
+        now = Now();
+    }
+    next += interval;
+    if (next < now) next = now; // running slower than the cap: don't try to catch up
+    return fps;
+}
+
 bool& InHook() {
     thread_local bool inHook = false;
     return inHook;

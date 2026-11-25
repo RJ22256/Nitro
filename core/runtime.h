@@ -50,6 +50,13 @@ struct FramePlan {
 };
 FramePlan PlanFrame(HWND window);
 
+// Frame limiter for the game's real frames (Nitro.ini FpsLimitMode/FpsLimit).
+// Call once per real frame, before presenting it. Returns the cap in fps
+// (0 = off).
+float LimitFrameRate();
+// The cap LimitFrameRate would use right now (0 = off).
+float FrameRateCap();
+
 // Call once per real frame: generated = frames generated for it.
 void NoteFrame(int generated, const char* api, UINT width, UINT height);
 
