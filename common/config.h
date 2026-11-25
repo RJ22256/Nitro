@@ -28,7 +28,7 @@ struct Config {
     int fpsLimitMode = 0;        // 0 off, 1 auto (refresh / multiplier), 2 custom
     int fpsLimit = 60;           // custom cap for the game's real frames
     bool diagnostics = false;
-    bool d3d11On12 = false;      // D3D12 games: run on the game's queue via D3D11On12 (faster, less compatible)    // D3D12 DRED: log what the GPU was doing if the device is removed
+    bool d3d11On12 = true;       // D3D12 games: run on the game's queue via D3D11On12 (0 = Nitro's own device + shared textures)    // D3D12 DRED: log what the GPU was doing if the device is removed
     std::wstring api = L"auto"; // auto, dxgi (DX10/11/12), d3d9, opengl, all
     std::wstring gameExe;       // file name of the game's exe (written by Install); empty = any
 };

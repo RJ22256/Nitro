@@ -427,7 +427,7 @@ bool SwapState::Init(IDXGISwapChain* sc) {
             return false;
         }
 
-        // Default: Nitro's own D3D11 device + shared textures. D3D11On12 on the
+        // D3D12Interop=0: Nitro's own D3D11 device + shared textures. D3D11On12 on the
         // game's queue is faster but some games/drivers remove the device when
         // it's used around their present (TLOU Part II: 0x887A002B). FSR
         // upscaling needs D3D11On12.
