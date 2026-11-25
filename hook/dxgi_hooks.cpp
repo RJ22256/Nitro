@@ -158,6 +158,71 @@ void STDMETHODCALLTYPE HookExecuteCommandLists(ID3D12CommandQueue* q, UINT n, ID
 }
 
 // ---------------------------------------------------------------------------
+// D3D12 diagnostics (Diagnostics=1 in Nitro.ini): DRED records what the GPU
+// was doing, so a device removal can be traced to the game or to Nitro.
+
+void EnableDred() {
+    using GetDebugInterfaceFn = HRESULT(WINAPI*)(REFIID, void**);
+    HMODULE d3d12 = LoadLibraryW(L"d3d12.dll");
+    auto get = d3d12 ? reinterpret_cast<GetDebugInterfaceFn>(GetProcAddress(d3d12, "D3D12GetDebugInterface")) : nullptr;
+    ComPtr<ID3D12DeviceRemovedExtendedDataSettings> dred;
+    if (!get || FAILED(get(IID_PPV_ARGS(&dred)))) {
+        Log("Diagnostics: DRED isn't available");
+        return;
+    }
+    dred->SetAutoBreadcrumbsEnablement(D3D12_DRED_ENABLEMENT_FORCED_ON);
+    dred->SetPageFaultEnablement(D3D12_DRED_ENABLEMENT_FORCED_ON);
+    Log("Diagnostics: D3D12 DRED breadcrumbs and page-fault tracking on");
+}
+
+const char* DredName(const char* a, const wchar_t* w, std::string& tmp) {
+    if (a && *a) return a;
+    if (w && *w) {
+        tmp = Narrow(w);
+        return tmp.c_str();
+    }
+    return "(unnamed)";
+}
+
+void LogDred(ID3D12Device* device) {
+    ComPtr<ID3D12DeviceRemovedExtendedData1> dred;
+    if (!device || FAILED(device->QueryInterface(IID_PPV_ARGS(&dred)))) {
+        Log("DRED: no data (turn on Diagnostics=1 in Nitro.ini and restart the game)");
+        return;
+    }
+    D3D12_DRED_AUTO_BREADCRUMBS_OUTPUT1 crumbs{};
+    if (SUCCEEDED(dred->GetAutoBreadcrumbsOutput1(&crumbs))) {
+        int shown = 0;
+        std::string t1, t2;
+        for (const D3D12_AUTO_BREADCRUMB_NODE1* n = crumbs.pHeadAutoBreadcrumbNode; n && shown < 12; n = n->pNext) {
+            const UINT done = n->pLastBreadcrumbValue ? *n->pLastBreadcrumbValue : 0;
+            if (done >= n->BreadcrumbCount) continue; // finished on the GPU
+            const int op = done < n->BreadcrumbCount && n->pCommandHistory ? n->pCommandHistory[done] : -1;
+            Log("DRED: unfinished command list '%s' on queue '%s': %u of %u ops done, next op %d",
+                DredName(n->pCommandListDebugNameA, n->pCommandListDebugNameW, t1),
+                DredName(n->pCommandQueueDebugNameA, n->pCommandQueueDebugNameW, t2), done, n->BreadcrumbCount, op);
+            ++shown;
+        }
+        if (!shown) Log("DRED: no unfinished command lists recorded");
+    }
+    D3D12_DRED_PAGE_FAULT_OUTPUT1 pf{};
+    if (SUCCEEDED(dred->GetPageFaultAllocationOutput1(&pf)) && pf.PageFaultVA) {
+        Log("DRED: GPU page fault at VA 0x%llx", static_cast<unsigned long long>(pf.PageFaultVA));
+        std::string t;
+        int k = 0;
+        for (const D3D12_DRED_ALLOCATION_NODE1* a = pf.pHeadExistingAllocationNode; a && k < 6; a = a->pNext, ++k)
+            Log("DRED:   live allocation there: '%s' (type %d)", DredName(a->ObjectNameA, a->ObjectNameW, t),
+                static_cast<int>(a->AllocationType));
+        k = 0;
+        for (const D3D12_DRED_ALLOCATION_NODE1* a = pf.pHeadRecentFreedAllocationNode; a && k < 6; a = a->pNext, ++k)
+            Log("DRED:   recently freed there: '%s' (type %d)", DredName(a->ObjectNameA, a->ObjectNameW, t),
+                static_cast<int>(a->AllocationType));
+    } else {
+        Log("DRED: no GPU page fault recorded");
+    }
+}
+
+// ---------------------------------------------------------------------------
 
 struct PresentCall {
     IDXGISwapChain* sc;
@@ -360,6 +425,11 @@ bool SwapState::Init(IDXGISwapChain* sc) {
         d3d12_ = true;
         deviceKey_ = queue_.Get();
         Log("Attached to a D3D12 swap chain (via D3D11On12)");
+        // Game frame generation on top of Nitro's makes two presenters fight
+        // over the same swap chain.
+        if (GetModuleHandleW(L"nvngx_dlssg.dll"))
+            Log("Note: DLSS Frame Generation is loaded in this game. Turn it off in the game's settings, or Nitro "
+                "and DLSS FG will both present frames and the game can crash.");
     }
 
     std::string err;
@@ -783,6 +853,10 @@ HRESULT SwapState::Present(const PresentCall& call) {
             // off for this swap chain and show the real frame as usual.
             Log("Presenting a generated frame failed (0x%08X%s) - frame generation off for this game window",
                 static_cast<unsigned>(hr), DeviceRemovedReason().c_str());
+            if (queue_) {
+                ComPtr<ID3D12Device> d;
+                if (SUCCEEDED(queue_->GetDevice(IID_PPV_ARGS(&d)))) LogDred(d.Get());
+            }
             fgFailed_ = true;
             return call.Real(call.sync, call.flags);
         }
@@ -1120,6 +1194,7 @@ HWND CreateDummyWindow() {
 }
 
 void InstallDxgiHooks() {
+    if (G().cfg.diagnostics) EnableDred();
     using CreateFactory1Fn = HRESULT(WINAPI*)(REFIID, void**);
     HMODULE dxgi = SystemModule(L"dxgi.dll");
     auto createFactory =
