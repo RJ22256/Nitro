@@ -1106,10 +1106,34 @@ SwapState* FindState(IDXGISwapChain* sc) {
     return it == g_states.end() ? nullptr : it->second.get();
 }
 
+// Overlays that also hook the game's present (and draw with D3D11On12 in
+// D3D12 games). Some of them make the driver remove the device when another
+// tool presents extra frames.
+void LogOverlays() {
+    struct Known {
+        const wchar_t* module;
+        const char* name;
+    };
+    const Known known[] = {{L"RTSSHooks64.dll", "RivaTuner Statistics Server (MSI Afterburner OSD)"},
+                           {L"RTSSHooks.dll", "RivaTuner Statistics Server (MSI Afterburner OSD)"},
+                           {L"OWClient.dll", "Overwolf"},
+                           {L"DiscordHook64.dll", "Discord overlay"},
+                           {L"GameOverlayRenderer64.dll", "Steam overlay"},
+                           {L"nvspcap64.dll", "NVIDIA overlay / ShadowPlay"},
+                           {L"gameoverlayrenderer.dll", "Steam overlay"},
+                           {L"MSIAfterburner.dll", "MSI Afterburner"},
+                           {L"FPSMonitor.dll", "FPS Monitor"},
+                           {L"ReShade64.dll", "ReShade"},
+                           {L"dxgi_reshade.dll", "ReShade"}};
+    for (const Known& k : known)
+        if (GetModuleHandleW(k.module)) Log("Overlay in this game: %s", k.name);
+}
+
 HRESULT HandlePresent(const PresentCall& call) {
     static bool loggedCall = false;
     if (!loggedCall && !InHook() && !(call.flags & DXGI_PRESENT_TEST)) {
         loggedCall = true;
+        LogOverlays();
         Log("Game presents with sync interval %u, flags 0x%X%s", call.sync, call.flags, call.present1 ? " (Present1)" : "");
     }
     if (InHook() || (call.flags & DXGI_PRESENT_TEST)) return call.Real(call.sync, call.flags);
