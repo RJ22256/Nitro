@@ -159,6 +159,7 @@ Check **`Nitro.log`** first. It's written next to the hook and records whether t
 | OpenGL game: log says *WGL_NV_DX_interop2 not supported* | The GPU driver can't share textures between OpenGL and D3D11. Update your driver. |
 | DX9 game: generated frames flash or tear | The game presents without VSync. Turn VSync on in the game. |
 | No log file at all | The hook never loaded. Usual causes: wrong exe (Unreal stub), a Vulkan/OpenGL game, or anti-cheat. |
+| DirectX 12 game crashes with *display driver* error 0x887A002B | Fixed in 0.2: Nitro no longer uses D3D11On12 by default. If a DX12 game runs fine and you want the slightly faster old path, add `D3D12Interop=1` to `Nitro.ini`. |
 | FSR Upscale does nothing | It needs a DirectX 11/12 game running borderless/windowed at a lower resolution than the window, and a game restart after switching it on. The log says *FSR 1: game renders WxH, upscaling to WxH* when it's active. |
 | Library is missing a game | Only Steam, Epic Games and GOG Galaxy installs are listed. Use **Browse...** for others. |
 | Uninstalling Nitro | Use **Remove from game** for each game first, then uninstall from Windows Settings → Apps. The uninstaller removes Nitro's settings, imported shaders and Vulkan layer registration, but doesn't touch game folders. |

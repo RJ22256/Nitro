@@ -278,6 +278,16 @@ private:
     void ScalePass(IDXGISwapChain* sc, ID3D11Texture2D* bb, const DXGI_SWAP_CHAIN_DESC& desc);
     bool EnsureBridge10(UINT w, UINT h, DXGI_FORMAT fmt);
     void Wait10();
+    // D3D12 without D3D11On12: frame gen runs on Nitro's own D3D11 device and
+    // frames move through shared textures, copied on the game's queue.
+    HRESULT PresentD3D12(const PresentCall& call, const DXGI_SWAP_CHAIN_DESC& desc);
+    bool EnsureBridge12(UINT w, UINT h, DXGI_FORMAT fmt);
+    bool InitCopier12();
+    // Records barriers + CopyResource on the game's queue. Shared textures sit
+    // in COMMON; back buffers in PRESENT (also 0). wait = block the CPU until done.
+    bool Copy12(ID3D12Resource* dst, ID3D12Resource* src, bool wait);
+    void Wait12(UINT64 value);
+    ComPtr<ID3D12Resource> CurrentBackBuffer12(IDXGISwapChain* sc);
 
     bool EnsureFrameGen(const DXGI_SWAP_CHAIN_DESC& desc);
     bool BeginFrame(IDXGISwapChain* sc, ComPtr<ID3D11Texture2D>& bb);
@@ -320,6 +330,18 @@ private:
     std::unique_ptr<Bridge> bridge_;
     ComPtr<ID3D10Texture2D> in10_, real10_;
     std::vector<ComPtr<ID3D10Texture2D>> out10_;
+    bool bridged12_ = false;
+    ComPtr<ID3D12Device> d12_;
+    ComPtr<ID3D12Resource> in12_, real12_;
+    std::vector<ComPtr<ID3D12Resource>> out12_;
+    static constexpr int kAllocators = 6;
+    ComPtr<ID3D12CommandAllocator> alloc12_[kAllocators];
+    UINT64 allocDone12_[kAllocators] = {};
+    int nextAlloc12_ = 0;
+    ComPtr<ID3D12GraphicsCommandList> list12_;
+    ComPtr<ID3D12Fence> fence12_;
+    UINT64 fenceValue12_ = 0;
+    HANDLE fenceEvent12_ = nullptr;
     ComPtr<ID3D11Device> dev_;
     ComPtr<ID3D11DeviceContext> ctx_;
 
@@ -403,6 +425,28 @@ bool SwapState::Init(IDXGISwapChain* sc) {
             Log("D3D12 swap chain: its command queue isn't known yet");
             retry_ = true;
             return false;
+        }
+
+        // Default: Nitro's own D3D11 device + shared textures. D3D11On12 on the
+        // game's queue is faster but some games/drivers remove the device when
+        // it's used around their present (TLOU Part II: 0x887A002B). FSR
+        // upscaling needs D3D11On12.
+        if (!G().cfg.d3d11On12 && G().cfg.fsrMode != 2) {
+            d12_ = d12;
+            luid_ = d12->GetAdapterLuid();
+            if (!InitCopier12()) return false;
+            d3d12_ = true;
+            bridged12_ = true;
+            deviceKey_ = queue_.Get();
+            Log("Attached to a D3D12 swap chain (frame gen on Nitro's own D3D11 device)");
+            DXGI_SWAP_CHAIN_DESC d{};
+            if (SUCCEEDED(FindVt(sc).getDesc(sc, &d)))
+                Log("Swap chain: %u buffers, swap effect %d, flags 0x%X, %s", d.BufferCount,
+                    static_cast<int>(d.SwapEffect), d.Flags, d.Windowed ? "windowed/borderless" : "exclusive fullscreen");
+            if (GetModuleHandleW(L"nvngx_dlssg.dll"))
+                Log("Note: DLSS Frame Generation is loaded in this game. Turn it off in the game's settings, or Nitro "
+                    "and DLSS FG will both present frames and the game can crash.");
+            return true;
         }
 
         HMODULE d3d11 = GetModuleHandleW(L"d3d11.dll");
@@ -659,6 +703,158 @@ HRESULT SwapState::PresentD3D10(const PresentCall& call, const DXGI_SWAP_CHAIN_D
     return call.Real(sync, flags);
 }
 
+bool SwapState::InitCopier12() {
+    const D3D12_COMMAND_LIST_TYPE type = queue_->GetDesc().Type;
+    for (auto& a : alloc12_)
+        if (FAILED(d12_->CreateCommandAllocator(type, IID_PPV_ARGS(&a)))) {
+            Log("D3D12: could not create a command allocator");
+            return false;
+        }
+    if (FAILED(d12_->CreateCommandList(0, type, alloc12_[0].Get(), nullptr, IID_PPV_ARGS(&list12_))) ||
+        FAILED(list12_->Close()) || FAILED(d12_->CreateFence(0, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(&fence12_)))) {
+        Log("D3D12: could not create a command list / fence");
+        return false;
+    }
+    fenceEvent12_ = CreateEventW(nullptr, FALSE, FALSE, nullptr);
+    list12_->SetName(L"Nitro copy");
+    return fenceEvent12_ != nullptr;
+}
+
+void SwapState::Wait12(UINT64 value) {
+    if (fence12_->GetCompletedValue() >= value) return;
+    if (SUCCEEDED(fence12_->SetEventOnCompletion(value, fenceEvent12_))) WaitForSingleObject(fenceEvent12_, 5000);
+}
+
+bool SwapState::Copy12(ID3D12Resource* dst, ID3D12Resource* src, bool wait) {
+    const int a = nextAlloc12_;
+    nextAlloc12_ = (nextAlloc12_ + 1) % kAllocators;
+    Wait12(allocDone12_[a]); // the allocator's previous commands must be finished
+    if (FAILED(alloc12_[a]->Reset()) || FAILED(list12_->Reset(alloc12_[a].Get(), nullptr))) return false;
+    D3D12_RESOURCE_BARRIER b[2] = {};
+    b[0].Type = b[1].Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+    b[0].Transition.pResource = src;
+    b[0].Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
+    b[0].Transition.StateBefore = D3D12_RESOURCE_STATE_COMMON; // == PRESENT
+    b[0].Transition.StateAfter = D3D12_RESOURCE_STATE_COPY_SOURCE;
+    b[1].Transition.pResource = dst;
+    b[1].Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
+    b[1].Transition.StateBefore = D3D12_RESOURCE_STATE_COMMON;
+    b[1].Transition.StateAfter = D3D12_RESOURCE_STATE_COPY_DEST;
+    list12_->ResourceBarrier(2, b);
+    list12_->CopyResource(dst, src);
+    std::swap(b[0].Transition.StateBefore, b[0].Transition.StateAfter);
+    std::swap(b[1].Transition.StateBefore, b[1].Transition.StateAfter);
+    list12_->ResourceBarrier(2, b);
+    if (FAILED(list12_->Close())) return false;
+    ID3D12CommandList* lists[] = {list12_.Get()};
+    queue_->ExecuteCommandLists(1, lists);
+    queue_->Signal(fence12_.Get(), ++fenceValue12_);
+    allocDone12_[a] = fenceValue12_;
+    if (wait) Wait12(fenceValue12_);
+    return true;
+}
+
+ComPtr<ID3D12Resource> SwapState::CurrentBackBuffer12(IDXGISwapChain* sc) {
+    ComPtr<IDXGISwapChain3> sc3;
+    ComPtr<ID3D12Resource> res;
+    if (SUCCEEDED(sc->QueryInterface(IID_PPV_ARGS(&sc3))))
+        vt_.getBuffer(sc, sc3->GetCurrentBackBufferIndex(), IID_PPV_ARGS(&res));
+    return res;
+}
+
+bool SwapState::EnsureBridge12(UINT w, UINT h, DXGI_FORMAT fmt) {
+    const DXGI_FORMAT view = ViewFormat(fmt);
+    if (bridge_ && bridge_->Matches(w, h, view, G().multiplier.load())) return true;
+    Wait12(fenceValue12_);
+    in12_.Reset();
+    real12_.Reset();
+    out12_.clear();
+    bridge_ = std::make_unique<Bridge>();
+    BridgeParams p;
+    p.adapter = &luid_;
+    p.width = w;
+    p.height = h;
+    p.format = view;
+    p.share = ShareMode::NtHandle;
+    std::string err;
+    if (!bridge_->Init(p, err)) {
+        Log("D3D12 frame generation setup failed: %s", err.c_str());
+        bridge_.reset();
+        return false;
+    }
+    bool ok = SUCCEEDED(d12_->OpenSharedHandle(bridge_->InputHandle(), IID_PPV_ARGS(&in12_))) &&
+              SUCCEEDED(d12_->OpenSharedHandle(bridge_->RealOutputHandle(), IID_PPV_ARGS(&real12_)));
+    out12_.resize(static_cast<size_t>(bridge_->MaxOutputs()));
+    for (int k = 0; ok && k < bridge_->MaxOutputs(); ++k)
+        ok = SUCCEEDED(d12_->OpenSharedHandle(bridge_->OutputHandle(k), IID_PPV_ARGS(&out12_[k])));
+    if (!ok) {
+        Log("D3D12 could not open Nitro's shared textures");
+        bridge_.reset();
+        return false;
+    }
+    Log("Frame generation ready: %ux%u, format %d, %dx (D3D12 via shared textures)", w, h, static_cast<int>(fmt),
+        G().multiplier.load());
+    return true;
+}
+
+HRESULT SwapState::PresentD3D12(const PresentCall& call, const DXGI_SWAP_CHAIN_DESC& desc) {
+    const bool generate = G().fgEnabled.load() && !fgFailed_;
+    const bool menu = OverlayVisible();
+    w_ = desc.BufferDesc.Width;
+    h_ = desc.BufferDesc.Height;
+    if (!EnsureBridge12(w_, h_, desc.BufferDesc.Format)) {
+        failed = true;
+        return call.Real(call.sync, call.flags);
+    }
+    UINT sync = call.sync, flags = call.flags;
+    if (G().cfg.vsyncPacing && generate) {
+        if (sync == 0) sync = 1;
+        flags &= ~static_cast<UINT>(DXGI_PRESENT_ALLOW_TEARING);
+    }
+    const UINT genFlags = flags & ~static_cast<UINT>(DXGI_PRESENT_DO_NOT_WAIT | DXGI_PRESENT_RESTART |
+                                                     DXGI_PRESENT_DO_NOT_SEQUENCE);
+
+    ComPtr<ID3D12Resource> bb = CurrentBackBuffer12(call.sc);
+    if (!bb || !Copy12(in12_.Get(), bb.Get(), true)) return call.Real(call.sync, call.flags);
+    bb.Reset();
+
+    bool drawMenu = false;
+    if (menu) drawMenu = OverlayBegin(bridge_->Device(), bridge_->Context(), desc.OutputWindow, w_, h_);
+    const FramePlan plan = PlanFrame(desc.OutputWindow);
+    const int n = bridge_->Run(generate,
+                               drawMenu ? Bridge::OverlayFn([](ID3D11DeviceContext* c, ID3D11Texture2D* t) {
+                                   OverlayDraw(c, t);
+                               })
+                                        : Bridge::OverlayFn{},
+                               plan.gens, plan.denom);
+    NoteFrame(n, "DirectX 12", w_, h_);
+    for (int k = 0; k < n; ++k) {
+        bb = CurrentBackBuffer12(call.sc);
+        if (!bb || !Copy12(bb.Get(), out12_[k].Get(), false)) return call.Real(sync, flags);
+        bb.Reset();
+        const HRESULT hr = call.Generated(sync, genFlags);
+        if (FAILED(hr)) {
+            Log("Presenting a generated frame failed (0x%08X%s) - frame generation off for this game window",
+                static_cast<unsigned>(hr), DeviceRemovedReason().c_str());
+            LogDred(d12_.Get());
+            fgFailed_ = true;
+            return call.Real(call.sync, call.flags);
+        }
+        if (!loggedFirstGen_) {
+            loggedFirstGen_ = true;
+            Log("First generated frame shown");
+        }
+    }
+    // After generated frames the current back buffer is a different one, so
+    // the real frame (or the sharpened / menu version) goes back in.
+    if (bridge_->RealOutputUsed() || n > 0) {
+        bb = CurrentBackBuffer12(call.sc);
+        if (bb) Copy12(bb.Get(), bridge_->RealOutputUsed() ? real12_.Get() : in12_.Get(), false);
+        bb.Reset();
+    }
+    return call.Real(sync, flags);
+}
+
 bool SwapState::EnsureFsr() {
     if (!fsrTried_) {
         fsrTried_ = true;
@@ -816,6 +1012,7 @@ HRESULT SwapState::Present(const PresentCall& call) {
         return call.Real(call.sync, call.flags);
     }
     if (d3d10_) return PresentD3D10(call, desc);
+    if (bridged12_) return PresentD3D12(call, desc);
     if (scaling_) EnsureRealSize(call.sc, desc);
     w_ = desc.BufferDesc.Width;
     h_ = desc.BufferDesc.Height;
